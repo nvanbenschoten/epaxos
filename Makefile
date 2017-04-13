@@ -23,10 +23,9 @@ test:
 dep:
 	@$(DEP) ensure -update
 
-# .PHONY: proto
-# proto:
-# 	@$(PROTOC) --go_out=plugins=grpc:. -I=.:../../../ epaxos/**/*.proto
-# 	@$(PROTOC) --go_out=plugins=grpc:. -I=.:../../../ transport/**/*.proto
+.PHONY: proto
+proto:
+	@$(PROTOC) --go_out=plugins=grpc:. -I=.:../../../ epaxos/**/*.proto
 
 .PHONY: check
 check:
