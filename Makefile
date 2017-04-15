@@ -1,6 +1,5 @@
 GO     ?= go
 DEP    ?= dep
-PROTOC ?= protoc
 
 TARGETS := 
 PKGS := $(shell go list ./... | grep -v /vendor)
@@ -17,7 +16,7 @@ clean:
 
 .PHONY: test
 test:
-	@$(GO) test -v ./epaxos
+	@$(GO) test -v $(PKGS)
 
 .PHONY: dep
 dep:
@@ -25,7 +24,7 @@ dep:
 
 .PHONY: proto
 proto:
-	@$(PROTOC) --go_out=plugins=grpc:. -I=.:../../../ epaxos/**/*.proto
+	@$(MAKE) -C epaxos/epaxospb regenerate
 
 .PHONY: check
 check:
