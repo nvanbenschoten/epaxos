@@ -1,6 +1,14 @@
 {
-    "memo": "c111d5e9ae6ebf06b211bd8857cc18790960393ee5c2badf71fbd3ba220235c4",
+    "memo": "9000db20085419b217ce1024d356719ccb3580c35ce1ad8607bc331c27f9db14",
     "projects": [
+        {
+            "name": "github.com/gogo/protobuf",
+            "version": "v0.4",
+            "revision": "100ba4e885062801d56799d78530b73b178a78f3",
+            "packages": [
+                "proto"
+            ]
+        },
         {
             "name": "github.com/golang/protobuf",
             "branch": "master",
