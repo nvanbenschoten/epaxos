@@ -1,20 +1,30 @@
 {
-    "memo": "9000db20085419b217ce1024d356719ccb3580c35ce1ad8607bc331c27f9db14",
+    "memo": "4bac4c2fce5787207c1952dd1363178e29ae20d44fc3b20cde8ba035294ef971",
     "projects": [
         {
             "name": "github.com/gogo/protobuf",
             "version": "v0.4",
             "revision": "100ba4e885062801d56799d78530b73b178a78f3",
             "packages": [
-                "proto"
+                "gogoproto",
+                "proto",
+                "protoc-gen-gogo/descriptor"
             ]
         },
         {
-            "name": "github.com/golang/protobuf",
+            "name": "github.com/google/btree",
             "branch": "master",
-            "revision": "2bba0603135d7d7f5cb73b2125beeda19c09f4ef",
+            "revision": "316fb6d3f031ae8f4d457c6c5186b9e3ded70435",
             "packages": [
-                "proto"
+                "."
+            ]
+        },
+        {
+            "name": "github.com/petar/GoLLRB",
+            "branch": "master",
+            "revision": "53be0d36a84c2a886ca057d34b6aa4468df9ccb4",
+            "packages": [
+                "llrb"
             ]
         }
     ]
