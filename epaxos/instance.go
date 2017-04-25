@@ -92,7 +92,7 @@ func (inst *instance) assertState(valid ...instanceState) {
 			return
 		}
 	}
-	inst.p.logger.Panicf("unexpected state %v", cur)
+	inst.p.logger.Panicf("unexpected state %v; expected %v", cur, valid)
 }
 
 // broadcastPreAccept broadcasts a PreAccept message to all other nodes.
@@ -143,17 +143,10 @@ func (inst *instance) onPreAccept(pa *pb.PreAccept) {
 		return
 	}
 
-	// Reuse the PreAccepts slice to attempt to avoid allocating a new one.
-	depsUnionSlice := pa.Deps[:0]
-	for dep := range depsUnion {
-		depsUnionSlice = append(depsUnionSlice, dep)
-	}
-	sort.Sort(pb.Dependencies(depsUnionSlice))
-
 	// Reply to PreAccept message with updated information.
 	inst.reply(&pb.PreAcceptReply{
 		UpdatedSeqNum: inst.seq,
-		UpdatedDeps:   depsUnionSlice,
+		UpdatedDeps:   depSliceFromMap(depsUnion),
 	})
 }
 
@@ -192,7 +185,7 @@ func (inst *instance) onPreAcceptReply(paReply *pb.PreAcceptReply) {
 
 	// Length check == equality check, because depsUnion was a union of remote
 	// deps and local deps.
-	sameDeps := len(paReply.UpdatedDeps) != len(inst.deps)
+	sameDeps := len(paReply.UpdatedDeps) == len(inst.deps)
 	if !sameDeps {
 		// Merge remote deps into local deps.
 		for _, dep := range paReply.UpdatedDeps {
@@ -291,8 +284,12 @@ func (inst *instance) applyInstanceState(is pb.InstanceState) {
 
 // depSlice returns the instance's dependencies as a slice instead of a map.
 func (inst *instance) depSlice() []pb.Dependency {
-	deps := make([]pb.Dependency, 0, len(inst.deps))
-	for dep := range inst.deps {
+	return depSliceFromMap(inst.deps)
+}
+
+func depSliceFromMap(depsMap map[pb.Dependency]struct{}) []pb.Dependency {
+	deps := make([]pb.Dependency, 0, len(depsMap))
+	for dep := range depsMap {
 		deps = append(deps, dep)
 	}
 	// Sort so that the order is deterministic.

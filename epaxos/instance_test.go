@@ -15,39 +15,18 @@ func (p *epaxos) assertOutbox(t *testing.T, outbox ...pb.Message) {
 	}
 }
 
-func TestTransitionToPreAccept(t *testing.T) {
-	p := newTestingEPaxos()
+func (p *epaxos) assertOutboxEmpty(t *testing.T) {
 	p.assertOutbox(t)
-
-	// Create a new command and transition to PreAccept.
-	newCmd := makeTestingCommand("a", "z")
-	newInst := p.onRequest(newCmd)
-
-	// Assert state.
-	newInst.assertState(preAccepted)
-
-	// Assert outbox.
-	msg := pb.Message{
-		InstanceMeta: pb.InstanceMeta{Replica: 0, InstanceNum: 3},
-		Type: pb.WrapMessageInner(&pb.PreAccept{InstanceState: pb.InstanceState{
-			Command: &newCmd,
-			SeqNum:  6,
-			Deps: []pb.Dependency{
-				{ReplicaID: 0, InstanceNum: 1},
-				{ReplicaID: 0, InstanceNum: 2},
-				{ReplicaID: 1, InstanceNum: 1},
-				{ReplicaID: 1, InstanceNum: 2},
-				{ReplicaID: 2, InstanceNum: 1},
-			},
-		}}),
-	}
-	p.assertOutbox(t, msg.WithDestination(1), msg.WithDestination(2))
 }
 
-func preAcceptMsg() (pb.InstanceMeta, pb.InstanceState, pb.Message) {
-	instMeta := pb.InstanceMeta{Replica: 1, InstanceNum: 3}
-	instState := pb.InstanceState{
-		Command: newTestingCommand("a", "z"),
+var (
+	testingCmd          = makeTestingCommand("a", "z")
+	testingInstanceMeta = pb.InstanceMeta{
+		Replica:     0,
+		InstanceNum: 3,
+	}
+	testingInstanceState = pb.InstanceState{
+		Command: &testingCmd,
 		SeqNum:  6,
 		Deps: []pb.Dependency{
 			{ReplicaID: 0, InstanceNum: 1},
@@ -57,12 +36,33 @@ func preAcceptMsg() (pb.InstanceMeta, pb.InstanceState, pb.Message) {
 			{ReplicaID: 2, InstanceNum: 1},
 		},
 	}
+)
+
+func TestTransitionToPreAccept(t *testing.T) {
+	p := newTestingEPaxos()
+	p.assertOutboxEmpty(t)
+
+	// Create a new command and transition to PreAccept.
+	newInst := p.onRequest(testingCmd)
+
+	// Assert state.
+	newInst.assertState(preAccepted)
+
+	// Assert outbox.
+	msg := pb.Message{
+		InstanceMeta: testingInstanceMeta,
+		Type:         pb.WrapMessageInner(&pb.PreAccept{InstanceState: testingInstanceState}),
+	}
+	p.assertOutbox(t, msg.WithDestination(1), msg.WithDestination(2))
+}
+
+func preAcceptMsg() (pb.InstanceMeta, pb.InstanceState, pb.Message) {
+	instMeta := pb.InstanceMeta{Replica: 1, InstanceNum: 3}
+	instState := testingInstanceState
 	msg := pb.Message{
 		InstanceMeta: instMeta,
 		Type:         pb.WrapMessageInner(&pb.PreAccept{InstanceState: instState}),
 	}
-	// The message handler may mutate the message, so make a deep copy to be safe.
-	instState.Deps = append([]pb.Dependency(nil), instState.Deps...)
 	return instMeta, instState, msg
 }
 
@@ -73,6 +73,7 @@ func preAcceptMsg() (pb.InstanceMeta, pb.InstanceState, pb.Message) {
 func TestOnPreAcceptWithNoNewInfo(t *testing.T) {
 	for _, extraCmd := range []bool{false, true} {
 		p := newTestingEPaxos()
+		p.assertOutboxEmpty(t)
 
 		if extraCmd {
 			// Add a command with a larger sequence number. In this scenerio, Replica 1
@@ -116,6 +117,7 @@ func TestOnPreAcceptWithNoNewInfo(t *testing.T) {
 // with the extra dependencies.
 func TestOnPreAcceptWithExtraInterferingCommand(t *testing.T) {
 	p := newTestingEPaxos()
+	p.assertOutboxEmpty(t)
 
 	// Add a command with a larger sequence number. In this scenerio, Replica 1
 	// is not aware of this command, which is why it its proposed sequence
@@ -158,4 +160,85 @@ func TestOnPreAcceptWithExtraInterferingCommand(t *testing.T) {
 		}),
 	}
 	p.assertOutbox(t, reply)
+}
+
+func TestOnPreAcceptOK(t *testing.T) {
+	p := newTestingEPaxos()
+
+	newInst := p.onRequest(testingCmd)
+	p.clearMsgs()
+
+	assertPreAcceptReplies := func(e int) {
+		if a := newInst.preAcceptReplies; a != e {
+			t.Errorf("expected %d preAcceptReplies, found %d", e, a)
+		}
+	}
+
+	// Assert state.
+	newInst.assertState(preAccepted)
+	assertPreAcceptReplies(0)
+
+	// Send PreAcceptOK.
+	p.Step(pb.Message{
+		To:           0,
+		InstanceMeta: testingInstanceMeta,
+		Type:         pb.WrapMessageInner(&pb.PreAcceptOK{}),
+	})
+
+	// Assert state.
+	newInst.assertState(committed)
+	assertPreAcceptReplies(1)
+
+	// Assert outbox.
+	msg := pb.Message{
+		InstanceMeta: testingInstanceMeta,
+		Type:         pb.WrapMessageInner(&pb.Commit{InstanceState: testingInstanceState}),
+	}
+	p.assertOutbox(t, msg.WithDestination(1), msg.WithDestination(2))
+}
+
+func TestOnPreAcceptReply(t *testing.T) {
+	p := newTestingEPaxos()
+
+	newInst := p.onRequest(testingCmd)
+	p.clearMsgs()
+
+	assertPreAcceptReplies := func(e int) {
+		if a := newInst.preAcceptReplies; a != e {
+			t.Errorf("expected %d preAcceptReplies, found %d", e, a)
+		}
+	}
+
+	// Assert state.
+	newInst.assertState(preAccepted)
+	assertPreAcceptReplies(0)
+
+	// Send PreAcceptOK.
+	updatedDeps := append([]pb.Dependency(nil), testingInstanceState.Deps...)
+	updatedDeps = append(updatedDeps, pb.Dependency{
+		ReplicaID:   2,
+		InstanceNum: 2,
+	})
+	p.Step(pb.Message{
+		To:           0,
+		InstanceMeta: testingInstanceMeta,
+		Type: pb.WrapMessageInner(&pb.PreAcceptReply{
+			UpdatedSeqNum: 7,
+			UpdatedDeps:   updatedDeps,
+		}),
+	})
+
+	// Assert state.
+	newInst.assertState(accepted)
+	assertPreAcceptReplies(1)
+
+	// Assert outbox.
+	instanceState := testingInstanceState
+	instanceState.SeqNum = 7
+	instanceState.Deps = updatedDeps
+	msg := pb.Message{
+		InstanceMeta: testingInstanceMeta,
+		Type:         pb.WrapMessageInner(&pb.Accept{InstanceState: instanceState}),
+	}
+	p.assertOutbox(t, msg.WithDestination(1), msg.WithDestination(2))
 }
