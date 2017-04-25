@@ -152,7 +152,7 @@ func (e *executor) executeSCC(comp scc) {
 			if w, ok := e.vertices[dep]; ok && comp.contains(w) {
 				continue
 			}
-			if !e.p.hasExecuted(dep) {
+			if !e.p.hasExecuted(dep.ReplicaID, dep.InstanceNum) {
 				return
 			}
 		}

@@ -149,7 +149,7 @@ func (p *epaxos) Request(cmd pb.Command) {
 
 func (p *epaxos) Step(m pb.Message) {
 	if ok := p.validateMessage(m); !ok {
-		p.logger.Warningf("found invalid Message: %v", m)
+		p.logger.Warningf("found invalid Message: %+v", m)
 		return
 	}
 
@@ -160,9 +160,14 @@ func (p *epaxos) Step(m pb.Message) {
 	if instItem := cmds.Get(instanceKey(i)); instItem != nil {
 		inst = instItem.(*instance)
 	} else {
-		if r == p.id {
+		if p.hasTruncated(r, i) {
+			// We've already truncated this instance, which means that it was
+			// already committed. Ignore the messsage.
+			p.logger.Debugf("ignoring message to truncated instance: %+v", m)
+			return
+		} else if r == p.id {
 			// We should always know about our own instances.
-			p.logger.Warningf("unknown local instance number: %v", m)
+			p.logger.Warningf("unknown local instance number: %+v", m)
 			return
 		}
 

@@ -39,14 +39,17 @@ func (p *epaxos) maxDeps(r pb.ReplicaID) map[pb.Dependency]struct{} {
 	return nil
 }
 
-func (p *epaxos) hasExecuted(dep pb.Dependency) bool {
-	if dep.InstanceNum <= p.maxTruncatedInstanceNum[dep.ReplicaID] {
+func (p *epaxos) hasTruncated(r pb.ReplicaID, i pb.InstanceNum) bool {
+	return i <= p.maxTruncatedInstanceNum[r]
+}
+
+func (p *epaxos) hasExecuted(r pb.ReplicaID, i pb.InstanceNum) bool {
+	if p.hasTruncated(r, i) {
 		return true
 	}
-	if instItem := p.commands[dep.ReplicaID].Get(instanceKey(dep.InstanceNum)); instItem != nil {
+	if instItem := p.commands[r].Get(instanceKey(i)); instItem != nil {
 		return instItem.(*instance).state == executed
 	}
-	p.logger.Panicf("unknown dependency %v", dep)
 	return false
 }
 
