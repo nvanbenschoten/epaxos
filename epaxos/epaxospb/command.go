@@ -56,10 +56,12 @@ func (c Command) Interferes(o Command) bool {
 // String returns a string-formatted version of the Command.
 func (c Command) String() string {
 	prefix := "reading"
+	data := ""
 	if c.Writing {
 		prefix = "writing"
+		data = fmt.Sprintf(": %q", c.Data)
 	}
-	return fmt.Sprintf("{%s %s %s}", c.ID.Short(), prefix, c.Span)
+	return fmt.Sprintf("{%s %s %s%s}", c.ID.Short(), prefix, c.Span, data)
 }
 
 // Dependencies is a slice of Dependencies.
