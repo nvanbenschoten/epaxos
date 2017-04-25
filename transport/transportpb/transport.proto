@@ -1,0 +1,37 @@
+syntax = "proto3";
+package transportpb;
+
+import "github.com/gogo/protobuf/gogoproto/gogo.proto";
+import "github.com/nvanbenschoten/epaxos/epaxos/epaxospb/epaxos.proto";
+
+// Empty is an empty message. It is identical to google.protobuf.Empty, but
+// permits future modifications because it is custom.
+message Empty {}
+
+// EPaxosTransport is an internal service between EPaxos nodes that supports
+// streaming of EPaxos messages.
+service EPaxosTransport {
+    rpc DeliverMessage(stream epaxospb.Message) returns (Empty) {}
+}
+
+message KVReadRequest {
+    bytes key = 1;
+}
+
+message KVWriteRequest {
+    bytes key = 1;
+    bytes value = 2;
+}
+
+// Result is an empty message. It is identical to google.protobuf.Empty, but
+// permits future modifications because it is custom.
+message KVResult {
+    bytes key = 1;
+    bytes value = 2;
+}
+
+// KVService is an external service that can perform key-value operations.
+service KVService {
+    rpc Read(KVReadRequest) returns (KVResult) {}
+    rpc Write(KVWriteRequest) returns (KVResult) {}
+}

@@ -1,7 +1,7 @@
 GO     ?= go
 DEP    ?= dep
 
-TARGETS := 
+TARGETS := server client
 PKGS := $(shell go list ./... | grep -v /vendor)
 
 .PHONY: build
@@ -24,7 +24,8 @@ dep:
 
 .PHONY: proto
 proto:
-	@$(MAKE) -C epaxos/epaxospb regenerate
+	@$(MAKE) -C epaxos/epaxospb       regenerate
+	@$(MAKE) -C transport/transportpb regenerate
 
 .PHONY: check
 check:

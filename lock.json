@@ -1,6 +1,14 @@
 {
-    "memo": "4bac4c2fce5787207c1952dd1363178e29ae20d44fc3b20cde8ba035294ef971",
+    "memo": "c188451f1aa4690bcf472360fef1196a9424d089c11a223bcbf1822365a38eb1",
     "projects": [
+        {
+            "name": "github.com/cockroachdb/cockroach",
+            "branch": "master",
+            "revision": "9ead8a7d2b1802e0749d12ee0767cd8b95349680",
+            "packages": [
+                "pkg/util/uuid"
+            ]
+        },
         {
             "name": "github.com/gogo/protobuf",
             "version": "v0.4",
@@ -9,6 +17,14 @@
                 "gogoproto",
                 "proto",
                 "protoc-gen-gogo/descriptor"
+            ]
+        },
+        {
+            "name": "github.com/golang/protobuf",
+            "branch": "master",
+            "revision": "2bba0603135d7d7f5cb73b2125beeda19c09f4ef",
+            "packages": [
+                "proto"
             ]
         },
         {
@@ -25,6 +41,79 @@
             "revision": "53be0d36a84c2a886ca057d34b6aa4468df9ccb4",
             "packages": [
                 "llrb"
+            ]
+        },
+        {
+            "name": "github.com/pkg/errors",
+            "version": "v0.8.0",
+            "revision": "645ef00459ed84a119197bfb8d8205042c6df63d",
+            "packages": [
+                "."
+            ]
+        },
+        {
+            "name": "github.com/satori/go.uuid",
+            "version": "v1.1.0",
+            "revision": "879c5887cd475cd7864858769793b2ceb0d44feb",
+            "packages": [
+                "."
+            ]
+        },
+        {
+            "name": "github.com/spf13/pflag",
+            "branch": "master",
+            "revision": "2300d0f8576fe575f71aaa5b9bbe4e1b0dc2eb51",
+            "packages": [
+                "."
+            ]
+        },
+        {
+            "name": "golang.org/x/net",
+            "branch": "master",
+            "revision": "da118f7b8e5954f39d0d2130ab35d4bf0e3cb344",
+            "packages": [
+                "context",
+                "http2",
+                "http2/hpack",
+                "idna",
+                "internal/timeseries",
+                "lex/httplex",
+                "trace"
+            ]
+        },
+        {
+            "name": "golang.org/x/text",
+            "branch": "master",
+            "revision": "a9a820217f98f7c8a207ec1e45a874e1fe12c478",
+            "packages": [
+                "internal/gen",
+                "internal/triegen",
+                "internal/ucd",
+                "secure/bidirule",
+                "transform",
+                "unicode/bidi",
+                "unicode/cldr",
+                "unicode/norm",
+                "unicode/rangetable"
+            ]
+        },
+        {
+            "name": "google.golang.org/grpc",
+            "version": "v1.2.1",
+            "revision": "8050b9cbc271307e5a716a9d782803d09b0d6f2d",
+            "packages": [
+                ".",
+                "codes",
+                "credentials",
+                "grpclog",
+                "internal",
+                "keepalive",
+                "metadata",
+                "naming",
+                "peer",
+                "stats",
+                "tap",
+                "transport"
             ]
         }
     ]
