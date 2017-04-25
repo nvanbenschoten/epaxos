@@ -4,6 +4,7 @@ import (
 	"math/rand"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/util/interval"
 	"github.com/google/btree"
 	"github.com/pkg/errors"
 
@@ -54,6 +55,9 @@ type epaxos struct {
 	maxTruncatedInstanceNum map[pb.ReplicaID]pb.InstanceNum
 	// maxTruncatedSeqNum is the maximum sequence number that has been truncated.
 	maxTruncatedSeqNum pb.SeqNum
+	// rangeGroup is used to minimize dependency lists by tracking transitive
+	// dependencies.
+	rangeGroup interval.RangeGroup
 
 	// executor holds execution state and handles the execution of committed
 	// instances.
@@ -90,6 +94,7 @@ func newEPaxos(c *Config) *epaxos {
 		logger:                  c.Logger,
 		commands:                make(map[pb.ReplicaID]*btree.BTree, len(c.Nodes)),
 		maxTruncatedInstanceNum: make(map[pb.ReplicaID]pb.InstanceNum),
+		rangeGroup:              interval.NewRangeTree(),
 		timers:                  make(map[*tickingTimer]struct{}),
 		rand:                    rand.New(rand.NewSource(c.RandSeed)),
 	}

@@ -39,7 +39,7 @@ func newTestingEPaxos() *epaxos {
 	p := newEPaxos(&c)
 
 	inst01 := p.newInstance(0, 1)
-	inst01.cmd = makeTestingCommand("a", "m")
+	inst01.cmd = makeTestingCommand("a", "z")
 	inst01.seq = 1
 	inst01.deps = map[pb.Dependency]struct{}{}
 
@@ -212,8 +212,6 @@ func TestOnRequestDependencies(t *testing.T) {
 	p.changeID(t, 1)
 	p.onRequest(newCmd)
 	expMaxDeps[1] = map[pb.Dependency]struct{}{
-		pb.Dependency{ReplicaID: 0, InstanceNum: 1}: {},
-		pb.Dependency{ReplicaID: 0, InstanceNum: 2}: {},
 		pb.Dependency{ReplicaID: 0, InstanceNum: 3}: {},
 		pb.Dependency{ReplicaID: 1, InstanceNum: 1}: {},
 		pb.Dependency{ReplicaID: 1, InstanceNum: 2}: {},
@@ -225,10 +223,7 @@ func TestOnRequestDependencies(t *testing.T) {
 	p.changeID(t, 2)
 	p.onRequest(newCmd)
 	expMaxDeps[2] = map[pb.Dependency]struct{}{
-		pb.Dependency{ReplicaID: 0, InstanceNum: 1}: {},
-		pb.Dependency{ReplicaID: 0, InstanceNum: 2}: {},
 		pb.Dependency{ReplicaID: 0, InstanceNum: 3}: {},
-		pb.Dependency{ReplicaID: 1, InstanceNum: 1}: {},
 		pb.Dependency{ReplicaID: 1, InstanceNum: 3}: {},
 	}
 	assertMaxDeps()
