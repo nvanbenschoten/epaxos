@@ -102,12 +102,12 @@ func (inst *instance) broadcastPreAccept() {
 
 // broadcastAccept broadcasts an Accept message to all other nodes.
 func (inst *instance) broadcastAccept() {
-	inst.broadcast(&pb.Accept{InstanceState: inst.instanceState()})
+	inst.broadcast(&pb.Accept{InstanceState: inst.instanceStateWithoutCommand()})
 }
 
 // broadcastCommit broadcasts a Commit message to all other nodes.
 func (inst *instance) broadcastCommit() {
-	inst.broadcast(&pb.Commit{InstanceState: inst.instanceState()})
+	inst.broadcast(&pb.Commit{})
 }
 
 //
@@ -172,31 +172,11 @@ func (inst *instance) onPreAcceptReply(paReply *pb.PreAcceptReply) {
 		return
 	}
 
-	// Check whether this PreAccept reply is identical to our preAccept or if
-	// the remote peer returned extra information that we weren't aware of. An
-	// identical fast path quorum allows us to skip the Paxos-Accept phase.
-	sameSeqs := inst.seq == paReply.UpdatedSeqNum
-	if !sameSeqs {
-		// paReply.UpdatedSeqNum will always be larger if it is updated, so this
-		// is identical to:
-		//   inst.seq = pb.MaxSeqNum(inst.seq, paReply.UpdatedSeqNum)
-		inst.seq = paReply.UpdatedSeqNum
-	}
+	// Update the instance state based on the PreAcceptReply.
+	changed := inst.updateInstanceState(paReply.UpdatedSeqNum, paReply.UpdatedDeps)
 
-	// Length check == equality check, because depsUnion was a union of remote
-	// deps and local deps.
-	sameDeps := len(paReply.UpdatedDeps) == len(inst.deps)
-	if !sameDeps {
-		// Merge remote deps into local deps.
-		for _, dep := range paReply.UpdatedDeps {
-			inst.deps[dep] = struct{}{}
-		}
-	}
-
-	// Update if we've ever seen any new information in PreAcceptReply messages.
-	if !inst.differentReplies {
-		inst.differentReplies = !(sameSeqs && sameDeps)
-	}
+	// Update whether we've ever seen any new information in PreAcceptReply messages.
+	inst.differentReplies = inst.differentReplies || changed
 
 	inst.preAcceptReplies++
 	inst.onEitherPreAcceptReply()
@@ -234,7 +214,7 @@ func (inst *instance) onAccept(a *pb.Accept) {
 	}
 
 	inst.state = accepted
-	inst.applyInstanceState(a.InstanceState)
+	inst.updateInstanceState(a.InstanceState.SeqNum, a.InstanceState.Deps)
 	inst.reply(&pb.AcceptOK{})
 }
 
@@ -257,7 +237,6 @@ func (inst *instance) onCommit(c *pb.Commit) {
 	}
 
 	inst.state = committed
-	inst.applyInstanceState(c.InstanceState)
 	inst.prepareToExecute()
 }
 
@@ -265,21 +244,45 @@ func (inst *instance) onCommit(c *pb.Commit) {
 // Utility Functions
 //
 
-func (inst *instance) instanceState() pb.InstanceState {
+func (inst *instance) instanceStateWithoutCommand() pb.InstanceState {
 	return pb.InstanceState{
-		Command: &inst.cmd,
-		SeqNum:  inst.seq,
-		Deps:    inst.depSlice(),
+		SeqNum: inst.seq,
+		Deps:   inst.depSlice(),
 	}
 }
 
-func (inst *instance) applyInstanceState(is pb.InstanceState) {
-	inst.cmd = *is.Command
-	inst.seq = is.SeqNum
-	inst.deps = make(map[pb.Dependency]struct{}, len(is.Deps))
-	for _, dep := range is.Deps {
-		inst.deps[dep] = struct{}{}
+func (inst *instance) instanceState() pb.InstanceState {
+	is := inst.instanceStateWithoutCommand()
+	is.Command = &inst.cmd
+	return is
+}
+
+// updateInstanceState updates the instance with the new sequence number and the
+// new dependencies. It returns whether the instance was changed.
+func (inst *instance) updateInstanceState(newSeq pb.SeqNum, newDeps []pb.Dependency) bool {
+	// Check whether this PreAccept reply is identical to our preAccept or if
+	// the remote peer returned extra information that we weren't aware of. An
+	// identical fast path quorum allows us to skip the Paxos-Accept phase.
+	sameSeq := inst.seq == newSeq
+	if !sameSeq {
+		// newSeq will always be larger if it is updated, so this
+		// is identical to:
+		//   inst.seq = pb.MaxSeqNum(inst.seq, newSeq)
+		inst.seq = newSeq
 	}
+
+	// Length check == equality check, because depsUnion was a union of remote
+	// deps and local deps.
+	sameDeps := len(newDeps) == len(inst.deps)
+	if !sameDeps {
+		// Merge remote deps into local deps.
+		for _, dep := range newDeps {
+			inst.deps[dep] = struct{}{}
+		}
+	}
+
+	changed := !(sameSeq && sameDeps)
+	return changed
 }
 
 // depSlice returns the instance's dependencies as a slice instead of a map.

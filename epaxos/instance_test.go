@@ -173,10 +173,16 @@ func TestOnPreAcceptOK(t *testing.T) {
 			t.Errorf("expected %d preAcceptReplies, found %d", e, a)
 		}
 	}
+	assertDeps := func(e int) {
+		if a := len(newInst.deps); a != e {
+			t.Errorf("expected %d dependencies, found %d", e, a)
+		}
+	}
 
-	// Assert state.
+	// Assert instance state.
 	newInst.assertState(preAccepted)
 	assertPreAcceptReplies(0)
+	assertDeps(5)
 
 	// Send PreAcceptOK.
 	p.Step(pb.Message{
@@ -185,14 +191,15 @@ func TestOnPreAcceptOK(t *testing.T) {
 		Type:         pb.WrapMessageInner(&pb.PreAcceptOK{}),
 	})
 
-	// Assert state.
+	// Assert instance state.
 	newInst.assertState(committed)
 	assertPreAcceptReplies(1)
+	assertDeps(5)
 
 	// Assert outbox.
 	msg := pb.Message{
 		InstanceMeta: testingInstanceMeta,
-		Type:         pb.WrapMessageInner(&pb.Commit{InstanceState: testingInstanceState}),
+		Type:         pb.WrapMessageInner(&pb.Commit{}),
 	}
 	p.assertOutbox(t, msg.WithDestination(1), msg.WithDestination(2))
 }
@@ -208,10 +215,16 @@ func TestOnPreAcceptReply(t *testing.T) {
 			t.Errorf("expected %d preAcceptReplies, found %d", e, a)
 		}
 	}
+	assertDeps := func(e int) {
+		if a := len(newInst.deps); a != e {
+			t.Errorf("expected %d dependencies, found %d", e, a)
+		}
+	}
 
-	// Assert state.
+	// Assert instance state.
 	newInst.assertState(preAccepted)
 	assertPreAcceptReplies(0)
+	assertDeps(5)
 
 	// Send PreAcceptOK.
 	updatedDeps := append([]pb.Dependency(nil), testingInstanceState.Deps...)
@@ -228,12 +241,14 @@ func TestOnPreAcceptReply(t *testing.T) {
 		}),
 	})
 
-	// Assert state.
+	// Assert instance state.
 	newInst.assertState(accepted)
 	assertPreAcceptReplies(1)
+	assertDeps(6)
 
 	// Assert outbox.
 	instanceState := testingInstanceState
+	instanceState.Command = nil
 	instanceState.SeqNum = 7
 	instanceState.Deps = updatedDeps
 	msg := pb.Message{

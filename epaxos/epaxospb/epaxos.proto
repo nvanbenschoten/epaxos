@@ -80,9 +80,7 @@ message Accept {
 
 message AcceptOK {}
 
-message Commit {
-    InstanceState state = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
-}
+message Commit {}
 
 // Ballot is a ballot number that ensures message freshness.
 message Ballot {
