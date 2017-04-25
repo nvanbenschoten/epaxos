@@ -84,14 +84,20 @@ func (inst *instance) transitionToCommit() {
 	inst.prepareToExecute()
 }
 
-func (inst *instance) assertState(valid ...instanceState) {
+func (inst *instance) isStates(states ...instanceState) bool {
 	cur := inst.state
-	for _, v := range valid {
-		if v == cur {
-			return
+	for _, s := range states {
+		if s == cur {
+			return true
 		}
 	}
-	inst.p.logger.Panicf("unexpected state %v; expected %v", cur, valid)
+	return false
+}
+
+func (inst *instance) assertState(valid ...instanceState) {
+	if !inst.isStates(valid...) {
+		inst.p.logger.Panicf("unexpected state %v; expected %v", inst.state, valid)
+	}
 }
 
 // broadcastPreAccept broadcasts a PreAccept message to all other nodes.
@@ -115,7 +121,7 @@ func (inst *instance) broadcastCommit() {
 
 func (inst *instance) onPreAccept(pa *pb.PreAccept) {
 	// Only handle if this is a new instance, and set the state to preAccepted.
-	if inst.state != none {
+	if !inst.isStates(none) {
 		inst.p.logger.Debugf("ignoring PreAccept message while in state %v: %v", inst.state, pa)
 		return
 	}
@@ -159,7 +165,7 @@ func (inst *instance) fastPathAvailable() bool {
 }
 
 func (inst *instance) onPreAcceptOK(paOK *pb.PreAcceptOK) {
-	if inst.state != preAccepted {
+	if !inst.isStates(preAccepted) {
 		inst.p.logger.Debugf("ignoring PreAcceptOK message while in state %v: %v", inst.state, paOK)
 		return
 	}
@@ -169,7 +175,7 @@ func (inst *instance) onPreAcceptOK(paOK *pb.PreAcceptOK) {
 }
 
 func (inst *instance) onPreAcceptReply(paReply *pb.PreAcceptReply) {
-	if inst.state != preAccepted {
+	if !inst.isStates(preAccepted) {
 		inst.p.logger.Debugf("ignoring PreAcceptReply message while in state %v: %v", inst.state, paReply)
 		return
 	}
@@ -210,7 +216,7 @@ func (inst *instance) onEitherPreAcceptReply() {
 }
 
 func (inst *instance) onAccept(a *pb.Accept) {
-	if inst.state != preAccepted {
+	if !inst.isStates(none, preAccepted) {
 		inst.p.logger.Debugf("ignoring Accept message while in state %v: %v", inst.state, a)
 		return
 	}
@@ -221,7 +227,7 @@ func (inst *instance) onAccept(a *pb.Accept) {
 }
 
 func (inst *instance) onAcceptOK(aOK *pb.AcceptOK) {
-	if inst.state != accepted {
+	if !inst.isStates(accepted) {
 		inst.p.logger.Debugf("ignoring AcceptOK message while in state %v: %v", inst.state, aOK)
 		return
 	}
@@ -233,7 +239,7 @@ func (inst *instance) onAcceptOK(aOK *pb.AcceptOK) {
 }
 
 func (inst *instance) onCommit(c *pb.Commit) {
-	if inst.state != preAccepted && inst.state != accepted {
+	if !inst.isStates(none, preAccepted, accepted) {
 		inst.p.logger.Debugf("ignoring Commit message while in state %v: %v", inst.state, c)
 		return
 	}
