@@ -59,6 +59,8 @@ replication protocol. Features include:
 
 Features not yet implemented:
 
+- Explicit Prepare Phase
+- Optimized Egalitarian Paxos (smaller fast path quorum)
 - Recovery
 - Persistence
 - Membership changes
