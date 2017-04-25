@@ -199,7 +199,7 @@ func TestOnPreAcceptOK(t *testing.T) {
 	// Assert outbox.
 	msg := pb.Message{
 		InstanceMeta: testingInstanceMeta,
-		Type:         pb.WrapMessageInner(&pb.Commit{}),
+		Type:         pb.WrapMessageInner(&pb.Commit{InstanceState: testingInstanceState}),
 	}
 	p.assertOutbox(t, msg.WithDestination(1), msg.WithDestination(2))
 }

@@ -82,7 +82,6 @@ func (inst *instance) transitionToCommit() {
 	inst.state = committed
 	inst.broadcastCommit()
 	inst.prepareToExecute()
-	// inst.p.deliverCommittedCommand(inst.cmd)
 }
 
 func (inst *instance) assertState(valid ...instanceState) {
@@ -107,7 +106,7 @@ func (inst *instance) broadcastAccept() {
 
 // broadcastCommit broadcasts a Commit message to all other nodes.
 func (inst *instance) broadcastCommit() {
-	inst.broadcast(&pb.Commit{})
+	inst.broadcast(&pb.Commit{InstanceState: inst.instanceState()})
 }
 
 //
@@ -124,6 +123,9 @@ func (inst *instance) onPreAccept(pa *pb.PreAccept) {
 
 	// Determine the local sequence number and deps for this command.
 	maxLocalSeq, localDeps := inst.p.seqAndDepsForCommand(*pa.Command)
+
+	// Record the command for the instance.
+	inst.cmd = *pa.Command
 
 	// The updated sequence number is set to the maximum of the local maximum
 	// sequence number and the the PreAccept's sequence number
@@ -214,7 +216,7 @@ func (inst *instance) onAccept(a *pb.Accept) {
 	}
 
 	inst.state = accepted
-	inst.updateInstanceState(a.InstanceState.SeqNum, a.InstanceState.Deps)
+	inst.updateInstanceState(a.SeqNum, a.Deps)
 	inst.reply(&pb.AcceptOK{})
 }
 
@@ -237,6 +239,8 @@ func (inst *instance) onCommit(c *pb.Commit) {
 	}
 
 	inst.state = committed
+	inst.cmd = *c.Command
+	inst.updateInstanceState(c.SeqNum, c.Deps)
 	inst.prepareToExecute()
 }
 
