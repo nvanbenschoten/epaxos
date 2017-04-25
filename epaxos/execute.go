@@ -55,11 +55,7 @@ func (e *executor) strongConnect() []scc {
 
 		for dep := range v.inst.deps {
 			if w, ok := e.vertices[dep]; ok {
-				v.neighbors = append(v.neighbors, w)
-			} else {
-				if !e.p.hasExecuted(dep) {
-					v.missingDep = true
-				}
+				v.depNodes = append(v.depNodes, w)
 			}
 		}
 	}
@@ -92,7 +88,7 @@ func (e *executor) visit(v *tarjanNode) {
 	v.onStack = true
 	e.push(v)
 
-	for _, w := range v.neighbors {
+	for _, w := range v.depNodes {
 		if !w.visited() {
 			e.visit(w)
 			v.lowlink = min(v.lowlink, w.lowlink)
@@ -115,8 +111,9 @@ func (e *executor) visit(v *tarjanNode) {
 type tarjanNode struct {
 	inst *instance
 
-	neighbors  []*tarjanNode
-	missingDep bool
+	// depNodes holds all dependencies of the instance that were also
+	// tarjanNodes in the current graph.
+	depNodes []*tarjanNode
 
 	index   int
 	lowlink int
@@ -124,11 +121,10 @@ type tarjanNode struct {
 }
 
 func (v *tarjanNode) reset() {
+	v.depNodes = v.depNodes[:0]
 	v.index = -1
 	v.lowlink = -1
 	v.onStack = false
-	v.missingDep = false
-	v.neighbors = v.neighbors[:0]
 }
 
 func (v *tarjanNode) visited() bool {
@@ -137,10 +133,28 @@ func (v *tarjanNode) visited() bool {
 
 type scc []*tarjanNode
 
+func (comp scc) contains(v *tarjanNode) bool {
+	for _, w := range comp {
+		if w == v {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *executor) executeSCC(comp scc) {
 	for _, v := range comp {
-		if v.missingDep {
-			return
+		for dep := range v.inst.deps {
+			// The dependency should either be in this strongly connected
+			// component or have already been executed (possibly by an earlier
+			// SCC). If those conditions are not true, abort executing the entire
+			// SCC.
+			if w, ok := e.vertices[dep]; ok && comp.contains(w) {
+				continue
+			}
+			if !e.p.hasExecuted(dep) {
+				return
+			}
 		}
 	}
 
