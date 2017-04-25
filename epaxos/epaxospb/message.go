@@ -9,10 +9,11 @@ import (
 // ReplicaID is the id of a replica in an EPaxos deployment.
 type ReplicaID uint64
 
-// InstanceNum is an instance number ... instance slots ...
+// InstanceNum is the number of an instance slot in a replica's command array.
 type InstanceNum uint64
 
-// SeqNum is a sequence number ... used to break ties ...
+// SeqNum is a sequence number of an instance used to break ties when executing
+// strongly connected command components. Essentially a Lamport logical clock.
 type SeqNum uint64
 
 // MaxInstanceNum returns the maximum Instance number.

@@ -159,9 +159,14 @@ func (e *executor) executeSCC(comp scc) {
 	}
 
 	// Sort the component based on sequence numbers (lamport logical clocks),
-	// which break ties in strongly connected components.
+	// which break ties in strongly connected components. If the sequence numbers
+	// are also the same, then we break ties based on ReplicaID, because commands
+	// in the same SCC will always be from different replicas.
 	sort.Slice(comp, func(i, j int) bool {
-		return comp[i].inst.seq < comp[j].inst.seq
+		if seqi, seqj := comp[i].inst.seq, comp[j].inst.seq; seqi != seqj {
+			return seqi < seqj
+		}
+		return comp[i].inst.r < comp[j].inst.r
 	})
 
 	for _, v := range comp {
