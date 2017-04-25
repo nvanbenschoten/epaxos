@@ -1,4 +1,4 @@
-package paxos
+package epaxos
 
 import "testing"
 

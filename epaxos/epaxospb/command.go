@@ -59,5 +59,19 @@ func (c Command) String() string {
 	if c.Writing {
 		prefix = "writing"
 	}
-	return fmt.Sprintf("{%s %s}", prefix, c.Span)
+	return fmt.Sprintf("{%s %s %s}", c.ID.Short(), prefix, c.Span)
+}
+
+// Dependencies is a slice of Dependencies.
+type Dependencies []Dependency
+
+// Dependencies implements the sort.Interface interface.
+func (d Dependencies) Len() int      { return len(d) }
+func (d Dependencies) Swap(i, j int) { d[i], d[j] = d[j], d[i] }
+func (d Dependencies) Less(i, j int) bool {
+	a, b := d[i], d[j]
+	if a.ReplicaID != b.ReplicaID {
+		return a.ReplicaID < b.ReplicaID
+	}
+	return a.InstanceNum < b.InstanceNum
 }

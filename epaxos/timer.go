@@ -1,4 +1,4 @@
-package paxos
+package epaxos
 
 // tickingTimer is a timer that is not linked to physical time, but instead is
 // controlled by calling its tick method. Using this timer allows timer state
@@ -49,7 +49,7 @@ func (t *tickingTimer) isSet() bool {
 	return !t.paused
 }
 
-func (t *tickingTimer) instrumentTimeout(instrumentedTimeout func()) {
+func (t *tickingTimer) instrument(instrumentedTimeout func()) {
 	old := t.onTimeout
 	t.onTimeout = func() {
 		instrumentedTimeout()

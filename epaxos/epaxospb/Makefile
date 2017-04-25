@@ -7,7 +7,7 @@ PROTOBUF_PATH  := $(GOGO_PROTOBUF_PATH)/protobuf
 
 .PHONY: regenerate
 regenerate:
-	@$(PROTOC) --gogo_out=grpc:. -I=.:$(VENDOR_DIR):$(PROTOBUF_PATH) *.proto
+	@$(PROTOC) --gogofaster_out=plugins=grpc:. -I=.:$(VENDOR_DIR):$(PROTOBUF_PATH) *.proto
 
 .PHONY: clean
 clean:
