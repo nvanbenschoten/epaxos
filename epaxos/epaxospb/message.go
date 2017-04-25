@@ -15,6 +15,14 @@ type InstanceNum uint64
 // SeqNum is a sequence number ... used to break ties ...
 type SeqNum uint64
 
+// MaxInstanceNum returns the maximum Instance number.
+func MaxInstanceNum(a, b InstanceNum) InstanceNum {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 // MaxSeqNum returns the maximum sequence number.
 func MaxSeqNum(a, b SeqNum) SeqNum {
 	if a > b {

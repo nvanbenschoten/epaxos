@@ -21,14 +21,14 @@ func (p *epaxos) maxInstanceNum(r pb.ReplicaID) pb.InstanceNum {
 	if maxInst := p.maxInstance(r); maxInst != nil {
 		return maxInst.i
 	}
-	return 0
+	return p.maxTruncatedInstanceNum[r]
 }
 
 func (p *epaxos) maxSeqNum(r pb.ReplicaID) pb.SeqNum {
 	if maxInst := p.maxInstance(r); maxInst != nil {
 		return maxInst.seq
 	}
-	return 0
+	return p.maxTruncatedSeqNum
 }
 
 func (p *epaxos) maxDeps(r pb.ReplicaID) map[pb.Dependency]struct{} {
@@ -39,6 +39,9 @@ func (p *epaxos) maxDeps(r pb.ReplicaID) map[pb.Dependency]struct{} {
 }
 
 func (p *epaxos) hasExecuted(dep pb.Dependency) bool {
+	if dep.InstanceNum <= p.maxTruncatedInstanceNum[dep.ReplicaID] {
+		return true
+	}
 	if instItem := p.commands[dep.ReplicaID].Get(instanceKey(dep.InstanceNum)); instItem != nil {
 		return instItem.(*instance).state == executed
 	}
@@ -86,11 +89,34 @@ func (p *epaxos) prepareToExecute(inst *instance) {
 	inst.assertState(committed)
 	p.executor.enqueueCommitted(inst)
 	p.executor.run()
+	p.truncateCommands()
 }
 
 func (p *epaxos) execute(inst *instance) {
 	inst.assertState(committed)
 	inst.state = executed
-	// TODO GC commands
 	p.deliverExecutedCommand(inst.cmd)
+}
+
+func (p *epaxos) truncateCommands() {
+	for r, cmds := range p.commands {
+		var executedItems []btree.Item
+		cmds.Ascend(func(i btree.Item) bool {
+			if i.(*instance).state == executed {
+				executedItems = append(executedItems, i)
+				return true
+			}
+			return false
+		})
+		if len(executedItems) > 0 {
+			curMaxInstNum := p.maxTruncatedInstanceNum[r]
+			for _, executedItem := range executedItems {
+				inst := executedItem.(*instance)
+				p.maxTruncatedSeqNum = pb.MaxSeqNum(p.maxTruncatedSeqNum, inst.seq)
+				curMaxInstNum = pb.MaxInstanceNum(curMaxInstNum, inst.i)
+				cmds.Delete(executedItem)
+			}
+			p.maxTruncatedInstanceNum[r] = curMaxInstNum
+		}
+	}
 }

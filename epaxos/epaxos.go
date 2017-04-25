@@ -49,6 +49,12 @@ type epaxos struct {
 	// commands is a map from replica to an ordered tree of instance, indexed by
 	// sequence number. BTree contains *instance elements.
 	commands map[pb.ReplicaID]*btree.BTree
+	// maxTruncatedInstanceNum is a mapping from replica to the maximum instance
+	// number that has been truncated up to in its command space.
+	maxTruncatedInstanceNum map[pb.ReplicaID]pb.InstanceNum
+	// maxTruncatedSeqNum is the maximum sequence number that has been truncated.
+	maxTruncatedSeqNum pb.SeqNum
+
 	// executor holds execution state and handles the execution of committed
 	// instances.
 	executor executor
@@ -79,12 +85,13 @@ func newEPaxos(c *Config) *epaxos {
 		panic(err.Error())
 	}
 	p := &epaxos{
-		id:       c.ID,
-		nodes:    c.Nodes,
-		logger:   c.Logger,
-		commands: make(map[pb.ReplicaID]*btree.BTree, len(c.Nodes)),
-		timers:   make(map[*tickingTimer]struct{}),
-		rand:     rand.New(rand.NewSource(c.RandSeed)),
+		id:                      c.ID,
+		nodes:                   c.Nodes,
+		logger:                  c.Logger,
+		commands:                make(map[pb.ReplicaID]*btree.BTree, len(c.Nodes)),
+		maxTruncatedInstanceNum: make(map[pb.ReplicaID]pb.InstanceNum),
+		timers:                  make(map[*tickingTimer]struct{}),
+		rand:                    rand.New(rand.NewSource(c.RandSeed)),
 	}
 	p.executor = makeExecutor(p)
 	for _, rep := range c.Nodes {
@@ -236,7 +243,7 @@ func (p *epaxos) quorum(val int) bool {
 }
 
 func (p *epaxos) fastQuorum(val int) bool {
-	return val > len(p.nodes)-1
+	return val >= len(p.nodes)-1
 	// // (x+y-1)/y == ceil(x/y)
 	// return val > (3*len(p.nodes)+(4-1))/4
 }
