@@ -2,7 +2,6 @@ GO     ?= go
 DEP    ?= dep
 
 TARGETS := server client
-PKGS := $(shell go list ./... | grep -v /vendor)
 
 .PHONY: build
 build:
@@ -16,7 +15,7 @@ clean:
 
 .PHONY: test
 test:
-	@$(GO) test -v $(PKGS)
+	@$(GO) test -v ./epaxos/...
 
 .PHONY: dep
 dep:
