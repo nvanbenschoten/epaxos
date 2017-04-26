@@ -49,7 +49,10 @@ func (c *client) sendReadRequest(
 		Key: key,
 	})
 	if err != nil {
-		return nil, c.onServerError(s, err)
+		if retry := c.onServerError(s, err); retry {
+			return c.sendReadRequest(ctx, key)
+		}
+		return nil, err
 	}
 	return gou, nil
 }
@@ -63,7 +66,10 @@ func (c *client) sendWriteRequest(
 		Value: value,
 	})
 	if err != nil {
-		return nil, c.onServerError(s, err)
+		if retry := c.onServerError(s, err); retry {
+			return c.sendWriteRequest(ctx, key, value)
+		}
+		return nil, err
 	}
 	return gou, nil
 }
@@ -79,10 +85,10 @@ func (c *client) randomServer() *transport.ExternalClient {
 	panic("unreachable")
 }
 
-func (c *client) onServerError(s *transport.ExternalClient, err error) error {
+func (c *client) onServerError(s *transport.ExternalClient, err error) bool {
 	if grpc.Code(err) == codes.Unavailable {
 		// If the node is down, remove it from the server set.
-		log.Printf("detected node unavailable")
+		log.Printf("detected node unavailable, retrying...")
 		delete(c.serverSet, s)
 		s.Close()
 
@@ -90,6 +96,7 @@ func (c *client) onServerError(s *transport.ExternalClient, err error) error {
 		if len(c.serverSet) == 0 {
 			log.Fatal("no servers available")
 		}
+		return true
 	}
-	return err
+	return false
 }

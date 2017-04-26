@@ -110,12 +110,17 @@ func (s *server) registerClientRequest(req transport.Request) {
 
 func (s *server) handleExecutedCmds(committed []epaxospb.Command) {
 	for _, cmd := range committed {
-		// This is where we would perform some deterministic update to the
-		// server's state machine.
-		s.logger.Infof("Executed command %+v", cmd)
+		ret, ok := s.pendingRequests[cmd.ID]
+
+		asLeader := ""
+		if ok {
+			asLeader = " as command leader"
+		}
+
+		s.logger.Infof("Executed command%s %+v", asLeader, cmd)
 		res := s.executeCommand(cmd)
 
-		if ret, ok := s.pendingRequests[cmd.ID]; ok {
+		if ok {
 			delete(s.pendingRequests, cmd.ID)
 			ret <- res
 			close(ret)

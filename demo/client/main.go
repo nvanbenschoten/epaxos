@@ -60,7 +60,7 @@ func main() {
 	ctx := context.Background()
 	reader := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Print("Write [y/n]: ")
+		fmt.Print("Read or Write [r/w]: ")
 		writeStr, err := reader.ReadString('\n')
 		if err != nil {
 			log.Fatal(err)
@@ -68,9 +68,9 @@ func main() {
 		writeStr = strings.TrimSpace(writeStr)
 		write := false
 		switch {
-		case writeStr == "y" || writeStr == "yes":
+		case writeStr == "w" || writeStr == "write":
 			write = true
-		case writeStr == "n" || writeStr == "no":
+		case writeStr == "r" || writeStr == "read":
 		default:
 			fmt.Printf("Unexpected response %q\n", writeStr)
 			continue
@@ -99,6 +99,6 @@ func main() {
 			log.Println(err)
 			continue
 		}
-		fmt.Printf("Key %q = %q\n", res.Key, res.Value)
+		fmt.Printf("Key %q: %q\n", res.Key, res.Value)
 	}
 }
