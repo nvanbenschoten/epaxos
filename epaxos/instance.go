@@ -20,13 +20,14 @@ const (
 )
 
 type instance struct {
-	p     *epaxos
-	r     pb.ReplicaID
-	i     pb.InstanceNum
-	cmd   pb.Command
-	seq   pb.SeqNum
-	deps  map[pb.Dependency]struct{}
-	state instanceState
+	p      *epaxos
+	r      pb.ReplicaID
+	i      pb.InstanceNum
+	cmd    pb.Command
+	seq    pb.SeqNum
+	deps   map[pb.Dependency]struct{}
+	ballot pb.Ballot
+	state  instanceState
 
 	// command-leader state
 	preAcceptReplies int

@@ -32,6 +32,30 @@ func MaxSeqNum(a, b SeqNum) SeqNum {
 	return b
 }
 
+// Compare compares the two Ballots.
+// The result will be 0 if b == b2, -1 if b < b2, and +1 if b > b2.
+func (b Ballot) Compare(b2 Ballot) int {
+	if b.Epoch < b2.Epoch {
+		return -1
+	}
+	if b.Epoch > b2.Epoch {
+		return 1
+	}
+	if b.Number < b2.Number {
+		return -1
+	}
+	if b.Number > b2.Number {
+		return 1
+	}
+	if b.ReplicaID < b2.ReplicaID {
+		return -1
+	}
+	if b.ReplicaID > b2.ReplicaID {
+		return 1
+	}
+	return 0
+}
+
 // WithDestination returns the message with the provided destination.
 func (msg Message) WithDestination(dest ReplicaID) Message {
 	msg.To = dest

@@ -29,9 +29,9 @@ message Command {
 }
 
 message Dependency {
-    int64 replica_id = 1 [(gogoproto.customname) = "ReplicaID", 
+    uint64 replica_id = 1 [(gogoproto.customname) = "ReplicaID", 
                           (gogoproto.casttype)   = "ReplicaID"];
-    int64 instance_num = 2 [(gogoproto.casttype)   = "InstanceNum"];
+    uint64 instance_num = 2 [(gogoproto.casttype)   = "InstanceNum"];
 }
 
 

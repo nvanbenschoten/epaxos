@@ -14,8 +14,9 @@ func (k Key) Equal(o Key) bool {
 }
 
 // Compare compares the two Keys.
-func (k Key) Compare(o Key) int {
-	return bytes.Compare(k, o)
+// The result will be 0 if k == k2, -1 if k < k2, and +1 if k > k2.
+func (k Key) Compare(k2 Key) int {
+	return bytes.Compare(k, k2)
 }
 
 // String returns a string-formatted version of the Key.
