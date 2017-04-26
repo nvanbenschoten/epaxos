@@ -10,7 +10,7 @@ import (
 	"google.golang.org/grpc/codes"
 
 	"github.com/nvanbenschoten/epaxos/epaxos"
-	pb "github.com/nvanbenschoten/epaxos/epaxos/epaxospb"
+	epaxospb "github.com/nvanbenschoten/epaxos/epaxos/epaxospb"
 	"github.com/nvanbenschoten/epaxos/transport"
 	transpb "github.com/nvanbenschoten/epaxos/transport/transportpb"
 )
@@ -21,14 +21,14 @@ const (
 )
 
 type server struct {
-	id     pb.ReplicaID
+	id     epaxospb.ReplicaID
 	node   epaxos.Node
 	logger epaxos.Logger
 	ticker *time.Ticker
 
 	server          *transport.EPaxosServer
-	clients         map[pb.ReplicaID]*transport.EPaxosClient
-	unavailClients  map[pb.ReplicaID]struct{}
+	clients         map[epaxospb.ReplicaID]*transport.EPaxosClient
+	unavailClients  map[epaxospb.ReplicaID]struct{}
 	pendingRequests map[uuid.UUID]chan<- transpb.KVResult
 
 	keyValueMap map[string][]byte
@@ -42,13 +42,13 @@ func newServer(ph parsedHostfile) (*server, error) {
 	}
 
 	// Create EPaxosClients for each other host in the network.
-	clients := make(map[pb.ReplicaID]*transport.EPaxosClient, len(ph.peerAddrs))
+	clients := make(map[epaxospb.ReplicaID]*transport.EPaxosClient, len(ph.peerAddrs))
 	for _, addr := range ph.peerAddrs {
 		pc, err := transport.NewEPaxosClient(addr.AddrStr())
 		if err != nil {
 			return nil, err
 		}
-		clients[pb.ReplicaID(addr.Idx)] = pc
+		clients[epaxospb.ReplicaID(addr.Idx)] = pc
 	}
 
 	config := ph.toPaxosConfig()
@@ -59,7 +59,7 @@ func newServer(ph parsedHostfile) (*server, error) {
 		ticker:          time.NewTicker(tickInterval),
 		server:          ps,
 		clients:         clients,
-		unavailClients:  make(map[pb.ReplicaID]struct{}, len(ph.peerAddrs)),
+		unavailClients:  make(map[epaxospb.ReplicaID]struct{}, len(ph.peerAddrs)),
 		pendingRequests: make(map[uuid.UUID]chan<- transpb.KVResult),
 		keyValueMap:     make(map[string][]byte),
 	}, nil
@@ -108,7 +108,7 @@ func (s *server) registerClientRequest(req transport.Request) {
 	s.pendingRequests[req.Command.ID] = req.ReturnC
 }
 
-func (s *server) handleExecutedCmds(committed []pb.Command) {
+func (s *server) handleExecutedCmds(committed []epaxospb.Command) {
 	for _, cmd := range committed {
 		// This is where we would perform some deterministic update to the
 		// server's state machine.
@@ -123,7 +123,7 @@ func (s *server) handleExecutedCmds(committed []pb.Command) {
 	}
 }
 
-func (s *server) executeCommand(cmd pb.Command) transpb.KVResult {
+func (s *server) executeCommand(cmd epaxospb.Command) transpb.KVResult {
 	if cmd.Span.EndKey != nil {
 		s.logger.Panicf("unexpected EndKey in command %+v", cmd)
 	}
@@ -138,8 +138,8 @@ func (s *server) executeCommand(cmd pb.Command) transpb.KVResult {
 	}
 }
 
-func (s *server) sendAll(ctx context.Context, msgs []pb.Message) error {
-	outboxes := make(map[pb.ReplicaID][]pb.Message)
+func (s *server) sendAll(ctx context.Context, msgs []epaxospb.Message) error {
+	outboxes := make(map[epaxospb.ReplicaID][]epaxospb.Message)
 	for _, m := range msgs {
 		outboxes[m.To] = append(outboxes[m.To], m)
 	}
@@ -154,7 +154,9 @@ func (s *server) sendAll(ctx context.Context, msgs []pb.Message) error {
 	return nil
 }
 
-func (s *server) sendAllTo(ctx context.Context, msgs []pb.Message, to pb.ReplicaID) (err error) {
+func (s *server) sendAllTo(
+	ctx context.Context, msgs []epaxospb.Message, to epaxospb.ReplicaID,
+) (err error) {
 	c, ok := s.clients[to]
 	if !ok {
 		return errors.Errorf("message found with unknown destination: %v", to)

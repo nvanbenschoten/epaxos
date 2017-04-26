@@ -10,7 +10,7 @@ import (
 
 	"github.com/nvanbenschoten/epaxos/cmd/util"
 	"github.com/nvanbenschoten/epaxos/epaxos"
-	pb "github.com/nvanbenschoten/epaxos/epaxos/epaxospb"
+	"github.com/nvanbenschoten/epaxos/epaxos/epaxospb"
 )
 
 const (
@@ -113,12 +113,12 @@ func (ph parsedHostfile) toPaxosConfig() *epaxos.Config {
 	if *verbose {
 		logger.EnableDebug()
 	}
-	nodes := make([]pb.ReplicaID, len(ph.peerAddrs)+1)
+	nodes := make([]epaxospb.ReplicaID, len(ph.peerAddrs)+1)
 	for i := range nodes {
-		nodes[i] = pb.ReplicaID(i)
+		nodes[i] = epaxospb.ReplicaID(i)
 	}
 	return &epaxos.Config{
-		ID:     pb.ReplicaID(ph.myID),
+		ID:     epaxospb.ReplicaID(ph.myID),
 		Nodes:  nodes,
 		Logger: logger,
 	}

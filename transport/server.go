@@ -3,15 +3,23 @@ package transport
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
+	"log"
 	"net"
 
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/grpclog"
 
 	epaxospb "github.com/nvanbenschoten/epaxos/epaxos/epaxospb"
 	transpb "github.com/nvanbenschoten/epaxos/transport/transportpb"
 )
+
+func init() {
+	// Silence gRPC logging.
+	grpclog.SetLogger(log.New(ioutil.Discard, "", 0))
+}
 
 // Request represents a request to perform a client update. It includes
 // a channel to return the globally ordered result on.
