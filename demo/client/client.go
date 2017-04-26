@@ -9,7 +9,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 
-	"github.com/nvanbenschoten/epaxos/cmd/util"
+	"github.com/nvanbenschoten/epaxos/demo/util"
 	"github.com/nvanbenschoten/epaxos/transport"
 	transpb "github.com/nvanbenschoten/epaxos/transport/transportpb"
 )

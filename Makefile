@@ -1,21 +1,11 @@
 GO     ?= go
 DEP    ?= dep
 
-TARGETS := server client
-
-.PHONY: build
-build:
-	@for target in $(TARGETS) ; do \
-		$(GO) build ./cmd/$$target ; \
-	done
-
-.PHONY: clean
-clean:
-	@$(RM) $(TARGETS)
+EPAXOSSRC := ./epaxos
 
 .PHONY: test
 test:
-	@$(GO) test -v ./epaxos/...
+	@$(GO) test -v $(EPAXOSSRC)/...
 
 .PHONY: dep
 dep:
@@ -28,4 +18,4 @@ proto:
 
 .PHONY: check
 check:
-	@$(GO) vet $(PKGS)
+	@$(GO) vet $(EPAXOSSRC)/...

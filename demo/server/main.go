@@ -8,7 +8,7 @@ import (
 	"github.com/pkg/errors"
 	flag "github.com/spf13/pflag"
 
-	"github.com/nvanbenschoten/epaxos/cmd/util"
+	"github.com/nvanbenschoten/epaxos/demo/util"
 	"github.com/nvanbenschoten/epaxos/epaxos"
 	"github.com/nvanbenschoten/epaxos/epaxos/epaxospb"
 )

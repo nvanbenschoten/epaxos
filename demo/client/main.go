@@ -13,7 +13,7 @@ import (
 
 	flag "github.com/spf13/pflag"
 
-	"github.com/nvanbenschoten/epaxos/cmd/util"
+	"github.com/nvanbenschoten/epaxos/demo/util"
 	transpb "github.com/nvanbenschoten/epaxos/transport/transportpb"
 )
 
