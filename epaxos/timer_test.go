@@ -19,6 +19,7 @@ func TestTickingTimer(t *testing.T) {
 
 	// The timer will tick until it reaches its timeout, upon which time
 	// it will call its function.
+	timer.reset()
 	timer.tick()
 	assertFlag(false)
 	assertTimerSet(true)

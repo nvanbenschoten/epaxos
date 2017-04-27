@@ -1,6 +1,7 @@
 package epaxos
 
 import (
+	"math/rand"
 	"reflect"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 // end keys.
 func makeTestingCommand(start, end string) pb.Command {
 	return pb.Command{
+		ID: rand.Uint64(),
 		Span: pb.Span{
 			Key:    pb.Key(start),
 			EndKey: pb.Key(end),

@@ -144,3 +144,65 @@ func (n *network) quorumHas(pred func(*epaxos) bool) bool {
 	}
 	return count > int(len(n.peers)/2)
 }
+
+func (n *network) waitExecuteInstance(inst *instance) bool {
+	const maxTicksPerInstanceExecution = 10
+	for i := 0; i < maxTicksPerInstanceExecution; i++ {
+		n.tickAll()
+		n.deliverAllMessages()
+		if n.quorumHas(func(p *epaxos) bool {
+			return p.hasExecuted(inst.r, inst.i)
+		}) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestExecuteCommandNoFailures(t *testing.T) {
+	n := newNetwork(5)
+
+	for _, peer := range n.peers {
+		cmd := makeTestingCommand("a", "z")
+		inst := peer.onRequest(cmd)
+
+		if !n.waitExecuteInstance(inst) {
+			t.Fatalf("command execution failed, command %+v never installed", cmd)
+		}
+	}
+}
+
+func TestExecuteCommandMinorityFailures(t *testing.T) {
+	n := newNetwork(5)
+	n.crash(0)
+	n.crash(1)
+
+	for _, peer := range n.peers {
+		if n.alive(peer) {
+			cmd := makeTestingCommand("a", "z")
+			inst := peer.onRequest(cmd)
+
+			if !n.waitExecuteInstance(inst) {
+				t.Fatalf("command execution failed, command %+v never installed", cmd)
+			}
+		}
+	}
+}
+
+func TestExecuteCommandMajorityFailures(t *testing.T) {
+	n := newNetwork(5)
+	n.crash(0)
+	n.crash(1)
+	n.crash(2)
+
+	for _, peer := range n.peers {
+		if n.alive(peer) {
+			cmd := makeTestingCommand("a", "z")
+			inst := peer.onRequest(cmd)
+
+			if n.waitExecuteInstance(inst) {
+				t.Fatalf("command execution succeeded with minority of nodes")
+			}
+		}
+	}
+}

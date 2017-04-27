@@ -15,6 +15,7 @@ func makeTickingTimer(timeout int, onTimeout func()) tickingTimer {
 	return tickingTimer{
 		timeout:   timeout,
 		onTimeout: onTimeout,
+		paused:    true,
 	}
 }
 

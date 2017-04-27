@@ -136,6 +136,7 @@ func (p *epaxos) registerOneTimeTimer(t *tickingTimer) {
 	t.instrument(func() {
 		p.unregisterTimer(t)
 	})
+	t.reset()
 }
 
 func (p *epaxos) unregisterTimer(t *tickingTimer) {
