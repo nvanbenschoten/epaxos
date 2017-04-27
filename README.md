@@ -88,3 +88,66 @@ throughout the `epaxos/*_test.go` files, while the network tests are located in
 the `epaxos/epaxos_test.go` file.
 
 To run all tests, run the command `make test`
+
+
+## Library Interface
+
+The library is designed around the the `epaxos` type, which is a single-threaded
+state machine implementing the Egalitarian Paxos consensus protocol. The state
+machine can be interacted with only through a `Node` instance, which is a
+thread-safe handle to a `epaxos` state machine.
+
+Because the library pushes tasks like storage handling and network transport up
+to the users of the library, these users have a few responsibilities. In a loop,
+the user should read from the `Node.Ready` channel and process the updates it
+contains. These `Ready` struct will contain any updates to the persistent state
+of the node that should be synced to disk, and messages that need to be
+delivered to other nodes, and any commands that have been successfully committed
+and that are ready to be executed. The user should also periodically call
+`Node.Tick` in regular interval (probably via a `time.Ticker`).
+
+Together, the state machine handling loop will look something like:
+
+```
+for {
+    select {
+    case <-ticker.C:
+        node.Tick()
+    case rd := <-node.Ready():
+        if rd.PersistentState != nil {
+            saveToStorage(rd.PersistentState)
+        }
+        for _, msg := range rd.Messages {
+            send(msg)
+        }
+        for _, cmd := range rd.ExecutableCommands {
+            execute(cmd)
+        }
+    case <-ctx.Done():
+        return
+    }
+}
+```
+
+To propose a change to the state machine, first construct a `pb.Command`
+message. The `pb.Command` message contains both an arbitrary byte slice to hold
+client updates and additional metadata fields to related to command
+interference. Use of these metadata fields in `pb.Command` is the mechanism in
+which clients of the library express application-specific command interference
+semantics. `pb.Commands` operate in a virtual keyspace, and each command
+operates over a subset of this keyspace, which is expressed in the `Span` field.
+`pb.Commands` can also be specified as reads or writes using the `Writing`
+field. Interference between commands is then defined as two commands whose
+`Spans` overlap, where at-least one of the commands is `Writing`.
+
+After a `pb.Command` is constructed with the desired update and the necessary
+interference constrains, call:
+
+```
+node.Propose(ctx, command)
+```
+
+Once executable, the `pb.Command` will appear in the `rd.ExecutableCommands` slice.
+
+
+
