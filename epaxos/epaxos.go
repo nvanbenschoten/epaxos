@@ -249,7 +249,13 @@ func inReplicaSlice(r pb.ReplicaID, s []pb.ReplicaID) bool {
 	return false
 }
 
+func (p *epaxos) F() int {
+	// N = 2F+1
+	return (len(p.nodes)+1)/2 - 1
+}
+
 func (p *epaxos) quorum(val int) bool {
+	// floor(N/2)+1
 	return val > len(p.nodes)/2
 }
 

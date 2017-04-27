@@ -21,6 +21,12 @@ func makeTestingCommand(start, end string) pb.Command {
 	}
 }
 
+func makeTestingReadCommand(start, end string) pb.Command {
+	cmd := makeTestingCommand(start, end)
+	cmd.Writing = false
+	return cmd
+}
+
 func newTestingCommand(start, end string) *pb.Command {
 	cmd := makeTestingCommand(start, end)
 	return &cmd
