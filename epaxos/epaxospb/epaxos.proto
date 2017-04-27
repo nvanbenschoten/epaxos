@@ -21,8 +21,7 @@ message Span {
 message Command {
     option (gogoproto.goproto_stringer) = false;
 
-    bytes id     = 1 [(gogoproto.customname) = "ID", (gogoproto.nullable) = false,
-        (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/util/uuid.UUID"];
+    uint64 id    = 1 [(gogoproto.customname) = "ID"];
     Span span    = 2 [(gogoproto.nullable) = false];
     bool writing = 3;
     bytes data   = 4;

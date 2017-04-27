@@ -5,9 +5,9 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net"
 
-	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/grpclog"
@@ -84,7 +84,7 @@ func (ps *EPaxosServer) Read(
 	ctx context.Context, req *transpb.KVReadRequest,
 ) (*transpb.KVResult, error) {
 	cmd := epaxospb.Command{
-		ID: uuid.MakeV4(),
+		ID: rand.Uint64(),
 		Span: epaxospb.Span{
 			Key: epaxospb.Key(req.Key),
 		},
@@ -110,7 +110,7 @@ func (ps *EPaxosServer) Write(
 	ctx context.Context, req *transpb.KVWriteRequest,
 ) (*transpb.KVResult, error) {
 	cmd := epaxospb.Command{
-		ID: uuid.MakeV4(),
+		ID: rand.Uint64(),
 		Span: epaxospb.Span{
 			Key: epaxospb.Key(req.Key),
 		},

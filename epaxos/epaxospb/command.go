@@ -62,7 +62,7 @@ func (c Command) String() string {
 		prefix = "writing"
 		data = fmt.Sprintf(": %q", c.Data)
 	}
-	return fmt.Sprintf("{%s %s %s%s}", c.ID.Short(), prefix, c.Span, data)
+	return fmt.Sprintf("{%d %s %s%s}", c.ID, prefix, c.Span, data)
 }
 
 // Dependencies is a slice of Dependencies.

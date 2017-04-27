@@ -9,7 +9,7 @@ import (
 
 var (
 	// ErrStopped is returned by methods on Nodes that have been stopped.
-	ErrStopped = errors.New("paxos: stopped")
+	ErrStopped = errors.New("epaxos: stopped")
 )
 
 // Ready encapsulates the entries and messages that are ready to read,

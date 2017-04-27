@@ -109,9 +109,14 @@ func (p *epaxos) seqAndDepsForCommand(cmd pb.Command) (pb.SeqNum, map[pb.Depende
 }
 
 func rangeForCmd(cmd pb.Command) interval.Range {
+	startKey := cmd.Span.Key
+	endKey := cmd.Span.EndKey
+	if len(endKey) == 0 {
+		endKey = append(startKey, 0)
+	}
 	return interval.Range{
-		Start: interval.Comparable(cmd.Span.Key),
-		End:   interval.Comparable(cmd.Span.EndKey),
+		Start: interval.Comparable(startKey),
+		End:   interval.Comparable(endKey),
 	}
 }
 

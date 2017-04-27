@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -29,7 +28,7 @@ type server struct {
 	server          *transport.EPaxosServer
 	clients         map[epaxospb.ReplicaID]*transport.EPaxosClient
 	unavailClients  map[epaxospb.ReplicaID]struct{}
-	pendingRequests map[uuid.UUID]chan<- transpb.KVResult
+	pendingRequests map[uint64]chan<- transpb.KVResult
 
 	keyValueMap map[string][]byte
 }
@@ -60,7 +59,7 @@ func newServer(ph parsedHostfile) (*server, error) {
 		server:          ps,
 		clients:         clients,
 		unavailClients:  make(map[epaxospb.ReplicaID]struct{}, len(ph.peerAddrs)),
-		pendingRequests: make(map[uuid.UUID]chan<- transpb.KVResult),
+		pendingRequests: make(map[uint64]chan<- transpb.KVResult),
 		keyValueMap:     make(map[string][]byte),
 	}, nil
 }

@@ -14,7 +14,7 @@ var clientOpts = []grpc.DialOption{
 	grpc.WithTimeout(15 * time.Second),
 }
 
-// EPaxosClient is a client stub implementing the PaxosTransportClient
+// EPaxosClient is a client stub implementing the EPaxosTransportClient
 // interface.
 type EPaxosClient struct {
 	transpb.EPaxosTransportClient
