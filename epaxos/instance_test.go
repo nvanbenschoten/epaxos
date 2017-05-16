@@ -192,7 +192,7 @@ func TestOnPreAcceptOK(t *testing.T) {
 	})
 
 	// Assert instance state.
-	newInst.assertState(committed)
+	newInst.assertState(committed, executed)
 	assertPreAcceptReplies(1)
 	assertDeps(5)
 

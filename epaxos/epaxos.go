@@ -154,13 +154,10 @@ func (p *epaxos) Step(m pb.Message) {
 		return
 	}
 
-	var inst *instance
 	r := m.InstanceMeta.Replica
 	i := m.InstanceMeta.InstanceNum
-	cmds := p.commands[r]
-	if instItem := cmds.Get(instanceKey(i)); instItem != nil {
-		inst = instItem.(*instance)
-	} else {
+	inst := p.getInstance(r, i)
+	if inst == nil {
 		if p.hasTruncated(r, i) {
 			// We've already truncated this instance, which means that it was
 			// already committed. Ignore the messsage.
@@ -174,7 +171,7 @@ func (p *epaxos) Step(m pb.Message) {
 
 		// Create a new instance if one does not already exist.
 		inst = p.newInstance(r, i)
-		cmds.ReplaceOrInsert(inst)
+		p.commands[r].ReplaceOrInsert(inst)
 	}
 
 	switch t := m.Type.(type) {

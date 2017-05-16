@@ -63,6 +63,42 @@ func instanceKey(i pb.InstanceNum) btree.Item {
 }
 
 //
+// executable Functions
+//
+
+func (inst *instance) Identifier() executableID {
+	return pb.Dependency{
+		ReplicaID:   inst.r,
+		InstanceNum: inst.i,
+	}
+}
+
+func (inst *instance) Dependencies() []executableID {
+	deps := make([]executableID, 0, len(inst.deps))
+	for dep := range inst.deps {
+		deps = append(deps, dep)
+	}
+	return deps
+}
+
+// ExecutesBefore determines which of two instances execute first. The ordering
+// is based on sequence numbers (lamport logical clocks), which break ties in
+// strongly connected components. If the sequence numbers are also the same,
+// then we break ties based on ReplicaID, because commands in the same SCC will
+// always be from different replicas.
+func (inst *instance) ExecutesBefore(b executable) bool {
+	instB := b.(*instance)
+	if seqA, seqB := inst.seq, instB.seq; seqA != seqB {
+		return seqA < seqB
+	}
+	return inst.r < instB.r
+}
+
+func (inst *instance) Execute() {
+	inst.p.execute(inst)
+}
+
+//
 // State-Transitions
 //
 

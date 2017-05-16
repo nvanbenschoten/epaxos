@@ -39,6 +39,13 @@ func (p *epaxos) maxDeps(r pb.ReplicaID) map[pb.Dependency]struct{} {
 	return nil
 }
 
+func (p *epaxos) getInstance(r pb.ReplicaID, i pb.InstanceNum) *instance {
+	if instItem := p.commands[r].Get(instanceKey(i)); instItem != nil {
+		return instItem.(*instance)
+	}
+	return nil
+}
+
 func (p *epaxos) hasTruncated(r pb.ReplicaID, i pb.InstanceNum) bool {
 	return i <= p.maxTruncatedInstanceNum[r]
 }
@@ -47,10 +54,26 @@ func (p *epaxos) hasExecuted(r pb.ReplicaID, i pb.InstanceNum) bool {
 	if p.hasTruncated(r, i) {
 		return true
 	}
-	if instItem := p.commands[r].Get(instanceKey(i)); instItem != nil {
-		return instItem.(*instance).state == executed
+	if inst := p.getInstance(r, i); inst != nil {
+		return inst.state == executed
 	}
 	return false
+}
+
+func (p *epaxos) hasCommitted(r pb.ReplicaID, i pb.InstanceNum) bool {
+	if p.hasExecuted(r, i) {
+		return true
+	}
+	if inst := p.getInstance(r, i); inst != nil {
+		return inst.state == committed
+	}
+	return false
+}
+
+// HasExecuted implements the history interface.
+func (p *epaxos) HasExecuted(e executableID) bool {
+	d := e.(pb.Dependency)
+	return p.hasExecuted(d.ReplicaID, d.InstanceNum)
 }
 
 // seqAndDepsForCommand determines the locally known maximum interfering sequence
@@ -139,7 +162,7 @@ func (p *epaxos) onRequest(cmd pb.Command) *instance {
 
 func (p *epaxos) prepareToExecute(inst *instance) {
 	inst.assertState(committed)
-	p.executor.enqueueCommitted(inst)
+	p.executor.addExec(inst)
 	p.executor.run()
 	p.truncateCommands()
 }
