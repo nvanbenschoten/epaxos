@@ -163,6 +163,7 @@ func (p *epaxos) onRequest(cmd pb.Command) *instance {
 func (p *epaxos) prepareToExecute(inst *instance) {
 	inst.assertState(committed)
 	p.executor.addExec(inst)
+	// TODO pull executor into a different goroutine and run asynchronously.
 	p.executor.run()
 	p.truncateCommands()
 }
