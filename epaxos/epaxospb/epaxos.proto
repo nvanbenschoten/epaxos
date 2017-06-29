@@ -27,13 +27,6 @@ message Command {
     bytes data   = 4;
 }
 
-message Dependency {
-    uint64 replica_id = 1 [(gogoproto.customname) = "ReplicaID", 
-                          (gogoproto.casttype)   = "ReplicaID"];
-    uint64 instance_num = 2 [(gogoproto.casttype)   = "InstanceNum"];
-}
-
-
 // message Request {
 //     Command command = 1;
 // }
@@ -46,19 +39,20 @@ message Dependency {
 
 // }
 
-message InstanceMeta {
-    uint64 replica      = 1 [(gogoproto.casttype) = "ReplicaID"];
+message InstanceID {
+    uint64 replica_id   = 1 [(gogoproto.customname) = "ReplicaID", 
+                             (gogoproto.casttype) = "ReplicaID"];
     uint64 instance_num = 2 [(gogoproto.casttype) = "InstanceNum"];
 }
 
-message InstanceState {
+message InstanceData {
     Command command = 1;
     uint64  seq_num = 2 [(gogoproto.casttype) = "SeqNum"];
-    repeated Dependency deps = 3 [(gogoproto.nullable) = false];
+    repeated InstanceID deps = 3 [(gogoproto.nullable) = false];
 }
 
 message PreAccept {
-    InstanceState state = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+    InstanceData data = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
 }
 
 // PreAcceptOK is used to respond to a PreAccept message is cases where the
@@ -70,24 +64,25 @@ message PreAcceptOK {}
 // information may either be a larger sequence number or extra dependencies.
 message PreAcceptReply {
     uint64 updated_seq_num = 1 [(gogoproto.casttype) = "SeqNum"];
-    repeated Dependency updated_deps = 2 [(gogoproto.nullable) = false];
+    repeated InstanceID updated_deps = 2 [(gogoproto.nullable) = false];
 }
 
 message Accept {
-    InstanceState state = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+    InstanceData data = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
 }
 
 message AcceptOK {}
 
 message Commit {
-    InstanceState state = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+    InstanceData data = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
 }
 
 // Ballot is a ballot number that ensures message freshness.
 message Ballot {
-   uint64 Epoch  = 1;
-   uint64 Number = 2;
-   uint64 ReplicaID = 3 [(gogoproto.casttype) = "ReplicaID"];
+   uint64 epoch  = 1;
+   uint64 number = 2;
+   uint64 replica_id = 3 [(gogoproto.customname) = "ReplicaID",
+                          (gogoproto.casttype) = "ReplicaID"];
 }
 
 message Message {
@@ -96,7 +91,8 @@ message Message {
     // ballot is the message's ballot number.
     Ballot ballot = 2 [(gogoproto.nullable) = false];
     // instance_meta holds information of the message's corresponding instance.
-    InstanceMeta instance_meta = 3 [(gogoproto.nullable) = false];
+    InstanceID instance_id = 3 [(gogoproto.nullable) = false,
+                                (gogoproto.customname) = "InstanceID"];
     // type is a union of different message types.
     oneof type {
         PreAccept      pre_accept       = 4;
@@ -106,4 +102,39 @@ message Message {
         AcceptOK       accept_ok        = 8;
         Commit         commit           = 9;
     }
+}
+
+message InstanceState {
+    InstanceID meta = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+
+    enum Status {
+        None = 0;
+        PreAccepted = 1;
+        Accepted = 2;
+        Committed = 3;
+        Executed = 4;
+    }
+    Status status = 2;
+
+    InstanceData data = 3 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+
+    Ballot ballot = 4;
+}
+
+message HardState {
+    // replica_id is the unique identifier for this node.
+    uint64 replica_id = 1 [(gogoproto.customname) = "ReplicaID",
+                           (gogoproto.casttype) = "ReplicaID"];
+
+    // nodes is the set of all nodes in the EPaxos network.
+    repeated uint64 nodes = 2 [(gogoproto.casttype) = "ReplicaID"];
+
+    // truncated_instance_nums is a mapping from ReplicaID to the current
+    // InstanceNum truncation index.
+    map<uint64, uint64> truncated_instance_nums = 3 [(gogoproto.castkey) = "ReplicaID",
+                                                     (gogoproto.castvalue) = "InstanceNum"];
+
+    // truncated_seq_num is the largest sequence number that has been
+    // truncated on this node.
+    uint64 truncated_seq_num = 4 [(gogoproto.casttype) = "SeqNum"];
 }

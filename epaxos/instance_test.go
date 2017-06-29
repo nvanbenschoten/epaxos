@@ -20,15 +20,15 @@ func (p *epaxos) assertOutboxEmpty(t *testing.T) {
 }
 
 var (
-	testingCmd          = makeTestingCommand("a", "z")
-	testingInstanceMeta = pb.InstanceMeta{
-		Replica:     0,
+	testingCmd        = newTestingCommand("a", "z")
+	testingInstanceID = pb.InstanceID{
+		ReplicaID:   0,
 		InstanceNum: 3,
 	}
-	testingInstanceState = pb.InstanceState{
-		Command: &testingCmd,
+	testingInstanceData = pb.InstanceData{
+		Command: testingCmd,
 		SeqNum:  6,
-		Deps: []pb.Dependency{
+		Deps: []pb.InstanceID{
 			{ReplicaID: 0, InstanceNum: 1},
 			{ReplicaID: 0, InstanceNum: 2},
 			{ReplicaID: 1, InstanceNum: 1},
@@ -46,24 +46,24 @@ func TestTransitionToPreAccept(t *testing.T) {
 	newInst := p.onRequest(testingCmd)
 
 	// Assert state.
-	newInst.assertState(preAccepted)
+	newInst.assertState(pb.InstanceState_PreAccepted)
 
 	// Assert outbox.
 	msg := pb.Message{
-		InstanceMeta: testingInstanceMeta,
-		Type:         pb.WrapMessageInner(&pb.PreAccept{InstanceState: testingInstanceState}),
+		InstanceID: testingInstanceID,
+		Type:       pb.WrapMessageInner(&pb.PreAccept{InstanceData: testingInstanceData}),
 	}
 	p.assertOutbox(t, msg.WithDestination(1), msg.WithDestination(2))
 }
 
-func preAcceptMsg() (pb.InstanceMeta, pb.InstanceState, pb.Message) {
-	instMeta := pb.InstanceMeta{Replica: 1, InstanceNum: 3}
-	instState := testingInstanceState
+func preAcceptMsg() (pb.InstanceID, pb.InstanceData, pb.Message) {
+	instMeta := pb.InstanceID{ReplicaID: 1, InstanceNum: 3}
+	instData := testingInstanceData
 	msg := pb.Message{
-		InstanceMeta: instMeta,
-		Type:         pb.WrapMessageInner(&pb.PreAccept{InstanceState: instState}),
+		InstanceID: instMeta,
+		Type:       pb.WrapMessageInner(&pb.PreAccept{InstanceData: instData}),
 	}
-	return instMeta, instState, msg
+	return instMeta, instData, msg
 }
 
 // TestOnPreAcceptWithNoNewInfo tests how a replica behaves when it receives
@@ -80,32 +80,34 @@ func TestOnPreAcceptWithNoNewInfo(t *testing.T) {
 			// is not aware of this command, which is why it its proposed sequence
 			// number did not take this command into account.
 			inst03 := p.newInstance(0, 3)
-			inst03.cmd = makeTestingCommand("zz", "zzz")
-			inst03.seq = 6
-			inst03.deps = map[pb.Dependency]struct{}{}
+			inst03.is.InstanceData = pb.InstanceData{
+				Command: newTestingCommand("zz", "zzz"),
+				SeqNum:  6,
+				Deps:    []pb.InstanceID{},
+			}
 			p.commands[0].ReplaceOrInsert(inst03)
 		}
 
-		instMeta, instState, msg := preAcceptMsg()
+		instMeta, instData, msg := preAcceptMsg()
 		p.Step(msg)
 
 		// Verify internal instance state after receiving message.
 		maxInst := p.maxInstance(1)
-		if a, e := maxInst.i, instMeta.InstanceNum; a != e {
+		if a, e := maxInst.is.InstanceNum, instMeta.InstanceNum; a != e {
 			t.Errorf("expected new instance with instance num %v, found %v", e, a)
 		}
-		if a, e := maxInst.seq, pb.SeqNum(6); a != e {
+		if a, e := maxInst.is.SeqNum, pb.SeqNum(6); a != e {
 			t.Errorf("expected new instance with seq num %v, found %v", e, a)
 		}
-		if a, e := maxInst.depSlice(), instState.Deps; !reflect.DeepEqual(a, e) {
+		if a, e := maxInst.is.Deps, instData.Deps; !reflect.DeepEqual(a, e) {
 			t.Errorf("expected new instance with deps %+v, found %+v", e, a)
 		}
 
 		// Verify outbox after receiving message.
 		reply := pb.Message{
-			To:           1,
-			InstanceMeta: instMeta,
-			Type:         pb.WrapMessageInner(&pb.PreAcceptOK{}),
+			To:         1,
+			InstanceID: instMeta,
+			Type:       pb.WrapMessageInner(&pb.PreAcceptOK{}),
 		}
 		p.assertOutbox(t, reply)
 	}
@@ -123,37 +125,39 @@ func TestOnPreAcceptWithExtraInterferingCommand(t *testing.T) {
 	// is not aware of this command, which is why it its proposed sequence
 	// number did not take this command into account.
 	inst03 := p.newInstance(0, 3)
-	inst03.cmd = makeTestingCommand("a", "z")
-	inst03.seq = 6
-	inst03.deps = map[pb.Dependency]struct{}{}
+	inst03.is.InstanceData = pb.InstanceData{
+		Command: newTestingCommand("a", "z"),
+		SeqNum:  6,
+		Deps:    []pb.InstanceID{},
+	}
 	p.commands[0].ReplaceOrInsert(inst03)
 
-	instMeta, instState, msg := preAcceptMsg()
+	instMeta, instData, msg := preAcceptMsg()
 	p.Step(msg)
 
 	// Verify internal instance state after receiving message.
 	maxInst := p.maxInstance(1)
-	if a, e := maxInst.i, instMeta.InstanceNum; a != e {
+	if a, e := maxInst.is.InstanceNum, instMeta.InstanceNum; a != e {
 		t.Errorf("expected new instance with instance num %v, found %v", e, a)
 	}
-	if a, e := maxInst.seq, pb.SeqNum(7); a != e {
+	if a, e := maxInst.is.SeqNum, pb.SeqNum(7); a != e {
 		t.Errorf("expected new instance with seq num %v, found %v", e, a)
 	}
 
 	// The extra command should be part of the deps.
-	expDeps := append(instState.Deps, pb.Dependency{
+	expDeps := append(instData.Deps, pb.InstanceID{
 		ReplicaID:   0,
 		InstanceNum: 3,
 	})
-	sort.Sort(pb.Dependencies(expDeps))
-	if a, e := maxInst.depSlice(), expDeps; !reflect.DeepEqual(a, e) {
+	sort.Sort(pb.InstanceIDs(expDeps))
+	if a, e := maxInst.is.Deps, expDeps; !reflect.DeepEqual(a, e) {
 		t.Errorf("expected new instance with deps %+v, found %+v", e, a)
 	}
 
 	// Verify outbox after receiving message.
 	reply := pb.Message{
-		To:           1,
-		InstanceMeta: instMeta,
+		To:         1,
+		InstanceID: instMeta,
 		Type: pb.WrapMessageInner(&pb.PreAcceptReply{
 			UpdatedSeqNum: 7,
 			UpdatedDeps:   expDeps,
@@ -174,32 +178,32 @@ func TestOnPreAcceptOK(t *testing.T) {
 		}
 	}
 	assertDeps := func(e int) {
-		if a := len(newInst.deps); a != e {
+		if a := len(newInst.is.Deps); a != e {
 			t.Errorf("expected %d dependencies, found %d", e, a)
 		}
 	}
 
 	// Assert instance state.
-	newInst.assertState(preAccepted)
+	newInst.assertState(pb.InstanceState_PreAccepted)
 	assertPreAcceptReplies(0)
 	assertDeps(5)
 
 	// Send PreAcceptOK.
 	p.Step(pb.Message{
-		To:           0,
-		InstanceMeta: testingInstanceMeta,
-		Type:         pb.WrapMessageInner(&pb.PreAcceptOK{}),
+		To:         0,
+		InstanceID: testingInstanceID,
+		Type:       pb.WrapMessageInner(&pb.PreAcceptOK{}),
 	})
 
 	// Assert instance state.
-	newInst.assertState(committed, executed)
+	newInst.assertState(pb.InstanceState_Committed, pb.InstanceState_Executed)
 	assertPreAcceptReplies(1)
 	assertDeps(5)
 
 	// Assert outbox.
 	msg := pb.Message{
-		InstanceMeta: testingInstanceMeta,
-		Type:         pb.WrapMessageInner(&pb.Commit{InstanceState: testingInstanceState}),
+		InstanceID: testingInstanceID,
+		Type:       pb.WrapMessageInner(&pb.Commit{InstanceData: testingInstanceData}),
 	}
 	p.assertOutbox(t, msg.WithDestination(1), msg.WithDestination(2))
 }
@@ -216,25 +220,25 @@ func TestOnPreAcceptReply(t *testing.T) {
 		}
 	}
 	assertDeps := func(e int) {
-		if a := len(newInst.deps); a != e {
+		if a := len(newInst.is.Deps); a != e {
 			t.Errorf("expected %d dependencies, found %d", e, a)
 		}
 	}
 
 	// Assert instance state.
-	newInst.assertState(preAccepted)
+	newInst.assertState(pb.InstanceState_PreAccepted)
 	assertPreAcceptReplies(0)
 	assertDeps(5)
 
 	// Send PreAcceptOK.
-	updatedDeps := append([]pb.Dependency(nil), testingInstanceState.Deps...)
-	updatedDeps = append(updatedDeps, pb.Dependency{
+	updatedDeps := append([]pb.InstanceID(nil), testingInstanceData.Deps...)
+	updatedDeps = append(updatedDeps, pb.InstanceID{
 		ReplicaID:   2,
 		InstanceNum: 2,
 	})
 	p.Step(pb.Message{
-		To:           0,
-		InstanceMeta: testingInstanceMeta,
+		To:         0,
+		InstanceID: testingInstanceID,
 		Type: pb.WrapMessageInner(&pb.PreAcceptReply{
 			UpdatedSeqNum: 7,
 			UpdatedDeps:   updatedDeps,
@@ -242,18 +246,18 @@ func TestOnPreAcceptReply(t *testing.T) {
 	})
 
 	// Assert instance state.
-	newInst.assertState(accepted)
+	newInst.assertState(pb.InstanceState_Accepted)
 	assertPreAcceptReplies(1)
 	assertDeps(6)
 
 	// Assert outbox.
-	instanceState := testingInstanceState
+	instanceState := testingInstanceData
 	instanceState.Command = nil
 	instanceState.SeqNum = 7
 	instanceState.Deps = updatedDeps
 	msg := pb.Message{
-		InstanceMeta: testingInstanceMeta,
-		Type:         pb.WrapMessageInner(&pb.Accept{InstanceState: instanceState}),
+		InstanceID: testingInstanceID,
+		Type:       pb.WrapMessageInner(&pb.Accept{InstanceData: instanceState}),
 	}
 	p.assertOutbox(t, msg.WithDestination(1), msg.WithDestination(2))
 }

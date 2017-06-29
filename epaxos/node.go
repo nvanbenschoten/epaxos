@@ -106,7 +106,7 @@ func (n *node) run(p *epaxos) {
 		case <-n.tickc:
 			p.Tick()
 		case cmd := <-n.propc:
-			p.Request(cmd)
+			p.Request(&cmd)
 		case m := <-n.msgc:
 			p.Step(m)
 		case readyc <- rd:

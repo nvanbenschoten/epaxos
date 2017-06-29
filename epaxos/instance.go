@@ -8,26 +8,9 @@ import (
 	pb "github.com/nvanbenschoten/epaxos/epaxos/epaxospb"
 )
 
-type instanceState int
-
-//go:generate stringer -type=instanceState
-const (
-	none instanceState = iota
-	preAccepted
-	accepted
-	committed
-	executed
-)
-
 type instance struct {
-	p      *epaxos
-	r      pb.ReplicaID
-	i      pb.InstanceNum
-	cmd    pb.Command
-	seq    pb.SeqNum
-	deps   map[pb.Dependency]struct{}
-	ballot pb.Ballot
-	state  instanceState
+	p  *epaxos
+	is pb.InstanceState
 
 	// command-leader state
 	preAcceptReplies int
@@ -41,7 +24,23 @@ type instance struct {
 const slowPathTimout = 2
 
 func (p *epaxos) newInstance(r pb.ReplicaID, i pb.InstanceNum) *instance {
-	inst := &instance{p: p, r: r, i: i}
+	inst := &instance{
+		p: p,
+		is: pb.InstanceState{
+			InstanceID: pb.InstanceID{
+				ReplicaID:   r,
+				InstanceNum: i,
+			},
+		},
+	}
+	inst.slowPathTimer = makeTickingTimer(slowPathTimout, func() {
+		inst.transitionToAccept()
+	})
+	return inst
+}
+
+func (p *epaxos) newInstanceFromState(is *pb.InstanceState) *instance {
+	inst := &instance{p: p, is: *is}
 	inst.slowPathTimer = makeTickingTimer(slowPathTimout, func() {
 		inst.transitionToAccept()
 	})
@@ -52,14 +51,14 @@ func (p *epaxos) newInstance(r pb.ReplicaID, i pb.InstanceNum) *instance {
 // BTree Functions
 //
 
-// Len implements the btree.Item interface.
+// Less implements the btree.Item interface.
 func (inst *instance) Less(than btree.Item) bool {
-	return inst.i < than.(*instance).i
+	return inst.is.Less(&than.(*instance).is)
 }
 
 // instanceKey creates a key to index into the commands btree.
 func instanceKey(i pb.InstanceNum) btree.Item {
-	return &instance{i: i}
+	return &instance{is: pb.InstanceState{InstanceID: pb.InstanceID{InstanceNum: i}}}
 }
 
 //
@@ -67,15 +66,15 @@ func instanceKey(i pb.InstanceNum) btree.Item {
 //
 
 func (inst *instance) Identifier() executableID {
-	return pb.Dependency{
-		ReplicaID:   inst.r,
-		InstanceNum: inst.i,
+	return pb.InstanceID{
+		ReplicaID:   inst.is.ReplicaID,
+		InstanceNum: inst.is.InstanceNum,
 	}
 }
 
 func (inst *instance) Dependencies() []executableID {
-	deps := make([]executableID, 0, len(inst.deps))
-	for dep := range inst.deps {
+	deps := make([]executableID, 0, len(inst.is.Deps))
+	for _, dep := range inst.is.Deps {
 		deps = append(deps, dep)
 	}
 	return deps
@@ -88,10 +87,10 @@ func (inst *instance) Dependencies() []executableID {
 // always be from different replicas.
 func (inst *instance) ExecutesBefore(b executable) bool {
 	instB := b.(*instance)
-	if seqA, seqB := inst.seq, instB.seq; seqA != seqB {
+	if seqA, seqB := inst.is.SeqNum, instB.is.SeqNum; seqA != seqB {
 		return seqA < seqB
 	}
-	return inst.r < instB.r
+	return inst.is.ReplicaID < instB.is.ReplicaID
 }
 
 func (inst *instance) Execute() {
@@ -103,26 +102,26 @@ func (inst *instance) Execute() {
 //
 
 func (inst *instance) transitionToPreAccept() {
-	inst.assertState(none)
-	inst.state = preAccepted
+	inst.assertState(pb.InstanceState_None)
+	inst.is.Status = pb.InstanceState_PreAccepted
 	inst.broadcastPreAccept()
 }
 
 func (inst *instance) transitionToAccept() {
-	inst.assertState(preAccepted)
-	inst.state = accepted
+	inst.assertState(pb.InstanceState_PreAccepted)
+	inst.is.Status = pb.InstanceState_Accepted
 	inst.broadcastAccept()
 }
 
 func (inst *instance) transitionToCommit() {
-	inst.assertState(preAccepted, accepted)
-	inst.state = committed
+	inst.assertState(pb.InstanceState_PreAccepted, pb.InstanceState_Accepted)
+	inst.is.Status = pb.InstanceState_Committed
 	inst.broadcastCommit()
 	inst.prepareToExecute()
 }
 
-func (inst *instance) isStates(states ...instanceState) bool {
-	cur := inst.state
+func (inst *instance) isStates(states ...pb.InstanceState_Status) bool {
+	cur := inst.is.Status
 	for _, s := range states {
 		if s == cur {
 			return true
@@ -131,25 +130,25 @@ func (inst *instance) isStates(states ...instanceState) bool {
 	return false
 }
 
-func (inst *instance) assertState(valid ...instanceState) {
+func (inst *instance) assertState(valid ...pb.InstanceState_Status) {
 	if !inst.isStates(valid...) {
-		inst.p.logger.Panicf("unexpected state %v; expected %v", inst.state, valid)
+		inst.p.logger.Panicf("unexpected state %v; expected %v", inst.is.Status, valid)
 	}
 }
 
 // broadcastPreAccept broadcasts a PreAccept message to all other nodes.
 func (inst *instance) broadcastPreAccept() {
-	inst.broadcast(&pb.PreAccept{InstanceState: inst.instanceState()})
+	inst.broadcast(&pb.PreAccept{InstanceData: inst.instanceData()})
 }
 
 // broadcastAccept broadcasts an Accept message to all other nodes.
 func (inst *instance) broadcastAccept() {
-	inst.broadcast(&pb.Accept{InstanceState: inst.instanceStateWithoutCommand()})
+	inst.broadcast(&pb.Accept{InstanceData: inst.instanceDataWithoutCommand()})
 }
 
 // broadcastCommit broadcasts a Commit message to all other nodes.
 func (inst *instance) broadcastCommit() {
-	inst.broadcast(&pb.Commit{InstanceState: inst.instanceState()})
+	inst.broadcast(&pb.Commit{InstanceData: inst.instanceData()})
 }
 
 //
@@ -158,40 +157,40 @@ func (inst *instance) broadcastCommit() {
 
 func (inst *instance) onPreAccept(pa *pb.PreAccept) {
 	// Only handle if this is a new instance, and set the state to preAccepted.
-	if !inst.isStates(none) {
-		inst.p.logger.Debugf("ignoring PreAccept message while in state %v: %v", inst.state, pa)
+	if !inst.isStates(pb.InstanceState_None) {
+		inst.p.logger.Debugf("ignoring PreAccept message while in state %v: %v", inst.is.Status, pa)
 		return
 	}
-	inst.state = preAccepted
+	inst.is.Status = pb.InstanceState_PreAccepted
 
 	// Determine the local sequence number and deps for this command.
-	maxLocalSeq, localDeps := inst.p.seqAndDepsForCommand(*pa.Command)
+	maxLocalSeq, localDeps := inst.p.seqAndDepsForCommand(pa.Command, inst.is.InstanceID)
 
 	// Record the command for the instance.
-	inst.cmd = *pa.Command
+	inst.is.Command = pa.Command
 
 	// The updated sequence number is set to the maximum of the local maximum
 	// sequence number and the the PreAccept's sequence number
-	inst.seq = pb.MaxSeqNum(pa.SeqNum, maxLocalSeq+1)
+	inst.is.SeqNum = pb.MaxSeqNum(pa.SeqNum, maxLocalSeq+1)
 
 	// Determine the union of the local dependencies and the PreAccept's dependencies.
 	depsUnion := localDeps
 	for _, dep := range pa.Deps {
 		depsUnion[dep] = struct{}{}
 	}
-	inst.deps = depsUnion
+	inst.is.Deps = depSliceFromMap(depsUnion)
 
 	// If the sequence number and the deps turn out to be the same as those in
 	// the PreAccept message, reply with a simple PreAcceptOK message.
-	if inst.seq == pa.SeqNum && len(inst.deps) == len(pa.Deps) {
+	if inst.is.SeqNum == pa.SeqNum && len(inst.is.Deps) == len(pa.Deps) {
 		inst.reply(&pb.PreAcceptOK{})
 		return
 	}
 
 	// Reply to PreAccept message with updated information.
 	inst.reply(&pb.PreAcceptReply{
-		UpdatedSeqNum: inst.seq,
-		UpdatedDeps:   depSliceFromMap(depsUnion),
+		UpdatedSeqNum: inst.is.SeqNum,
+		UpdatedDeps:   inst.is.Deps,
 	})
 }
 
@@ -202,8 +201,8 @@ func (inst *instance) fastPathAvailable() bool {
 }
 
 func (inst *instance) onPreAcceptOK(paOK *pb.PreAcceptOK) {
-	if !inst.isStates(preAccepted) {
-		inst.p.logger.Debugf("ignoring PreAcceptOK message while in state %v: %v", inst.state, paOK)
+	if !inst.isStates(pb.InstanceState_PreAccepted) {
+		inst.p.logger.Debugf("ignoring PreAcceptOK message while in state %v: %v", inst.is.Status, paOK)
 		return
 	}
 
@@ -212,13 +211,13 @@ func (inst *instance) onPreAcceptOK(paOK *pb.PreAcceptOK) {
 }
 
 func (inst *instance) onPreAcceptReply(paReply *pb.PreAcceptReply) {
-	if !inst.isStates(preAccepted) {
-		inst.p.logger.Debugf("ignoring PreAcceptReply message while in state %v: %v", inst.state, paReply)
+	if !inst.isStates(pb.InstanceState_PreAccepted) {
+		inst.p.logger.Debugf("ignoring PreAcceptReply message while in state %v: %v", inst.is.Status, paReply)
 		return
 	}
 
 	// Update the instance state based on the PreAcceptReply.
-	changed := inst.updateInstanceState(paReply.UpdatedSeqNum, paReply.UpdatedDeps)
+	changed := inst.updateInstanceData(paReply.UpdatedSeqNum, paReply.UpdatedDeps)
 
 	// Update whether we've ever seen any new information in PreAcceptReply messages.
 	inst.differentReplies = inst.differentReplies || changed
@@ -253,19 +252,19 @@ func (inst *instance) onEitherPreAcceptReply() {
 }
 
 func (inst *instance) onAccept(a *pb.Accept) {
-	if !inst.isStates(none, preAccepted) {
-		inst.p.logger.Debugf("ignoring Accept message while in state %v: %v", inst.state, a)
+	if !inst.isStates(pb.InstanceState_None, pb.InstanceState_PreAccepted) {
+		inst.p.logger.Debugf("ignoring Accept message while in state %v: %v", inst.is.Status, a)
 		return
 	}
 
-	inst.state = accepted
-	inst.updateInstanceState(a.SeqNum, a.Deps)
+	inst.is.Status = pb.InstanceState_Accepted
+	inst.updateInstanceData(a.SeqNum, a.Deps)
 	inst.reply(&pb.AcceptOK{})
 }
 
 func (inst *instance) onAcceptOK(aOK *pb.AcceptOK) {
-	if !inst.isStates(accepted) {
-		inst.p.logger.Debugf("ignoring AcceptOK message while in state %v: %v", inst.state, aOK)
+	if !inst.isStates(pb.InstanceState_Accepted) {
+		inst.p.logger.Debugf("ignoring AcceptOK message while in state %v: %v", inst.is.Status, aOK)
 		return
 	}
 
@@ -276,14 +275,14 @@ func (inst *instance) onAcceptOK(aOK *pb.AcceptOK) {
 }
 
 func (inst *instance) onCommit(c *pb.Commit) {
-	if !inst.isStates(none, preAccepted, accepted) {
-		inst.p.logger.Debugf("ignoring Commit message while in state %v: %v", inst.state, c)
+	if !inst.isStates(pb.InstanceState_None, pb.InstanceState_PreAccepted, pb.InstanceState_Accepted) {
+		inst.p.logger.Debugf("ignoring Commit message while in state %v: %v", inst.is.Status, c)
 		return
 	}
 
-	inst.state = committed
-	inst.cmd = *c.Command
-	inst.updateInstanceState(c.SeqNum, c.Deps)
+	inst.is.Status = pb.InstanceState_Committed
+	inst.is.Command = c.Command
+	inst.updateInstanceData(c.SeqNum, c.Deps)
 	inst.prepareToExecute()
 }
 
@@ -291,60 +290,64 @@ func (inst *instance) onCommit(c *pb.Commit) {
 // Utility Functions
 //
 
-func (inst *instance) instanceStateWithoutCommand() pb.InstanceState {
-	return pb.InstanceState{
-		SeqNum: inst.seq,
-		Deps:   inst.depSlice(),
+func (inst *instance) instanceDataWithoutCommand() pb.InstanceData {
+	return pb.InstanceData{
+		SeqNum: inst.is.SeqNum,
+		Deps:   inst.is.Deps,
 	}
 }
 
-func (inst *instance) instanceState() pb.InstanceState {
-	is := inst.instanceStateWithoutCommand()
-	is.Command = &inst.cmd
+func (inst *instance) instanceData() pb.InstanceData {
+	is := inst.instanceDataWithoutCommand()
+	is.Command = inst.is.Command
 	return is
 }
 
-// updateInstanceState updates the instance with the new sequence number and the
+// updateInstanceData updates the instance with the new sequence number and the
 // new dependencies. It returns whether the instance was changed.
-func (inst *instance) updateInstanceState(newSeq pb.SeqNum, newDeps []pb.Dependency) bool {
+func (inst *instance) updateInstanceData(newSeq pb.SeqNum, newDeps []pb.InstanceID) bool {
 	// Check whether this PreAccept reply is identical to our preAccept or if
 	// the remote peer returned extra information that we weren't aware of. An
 	// identical fast path quorum allows us to skip the Paxos-Accept phase.
-	sameSeq := inst.seq == newSeq
+	sameSeq := inst.is.SeqNum == newSeq
 	if !sameSeq {
 		// newSeq will always be larger if it is updated, so this
 		// is identical to:
 		//   inst.seq = pb.MaxSeqNum(inst.seq, newSeq)
-		inst.seq = newSeq
+		inst.is.SeqNum = newSeq
 	}
 
 	// Length check == equality check, because depsUnion was a union of remote
 	// deps and local deps.
-	sameDeps := len(newDeps) == len(inst.deps)
+	sameDeps := len(newDeps) == len(inst.is.Deps)
 	if !sameDeps {
 		// Merge remote deps into local deps.
-		for _, dep := range newDeps {
-			inst.deps[dep] = struct{}{}
-		}
+		inst.is.Deps = unionDepSlices(inst.is.Deps, newDeps)
 	}
 
 	changed := !(sameSeq && sameDeps)
 	return changed
 }
 
-// depSlice returns the instance's dependencies as a slice instead of a map.
-func (inst *instance) depSlice() []pb.Dependency {
-	return depSliceFromMap(inst.deps)
-}
-
-func depSliceFromMap(depsMap map[pb.Dependency]struct{}) []pb.Dependency {
-	deps := make([]pb.Dependency, 0, len(depsMap))
+func depSliceFromMap(depsMap map[pb.InstanceID]struct{}) []pb.InstanceID {
+	deps := make([]pb.InstanceID, 0, len(depsMap))
 	for dep := range depsMap {
 		deps = append(deps, dep)
 	}
 	// Sort so that the order is deterministic.
-	sort.Sort(pb.Dependencies(deps))
+	sort.Sort(pb.InstanceIDs(deps))
 	return deps
+}
+
+func unionDepSlices(a, b []pb.InstanceID) []pb.InstanceID {
+	depUnion := make(map[pb.InstanceID]struct{})
+	for _, dep := range a {
+		depUnion[dep] = struct{}{}
+	}
+	for _, dep := range b {
+		depUnion[dep] = struct{}{}
+	}
+	return depSliceFromMap(depUnion)
 }
 
 func (inst *instance) prepareToExecute() {

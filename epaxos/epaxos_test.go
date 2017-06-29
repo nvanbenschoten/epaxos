@@ -184,7 +184,7 @@ func (n *network) waitExecuteInstance(inst *instance) bool {
 		n.tickAll()
 		n.deliverAllMessages()
 		if n.quorumHas(func(p *epaxos) bool {
-			return p.hasExecuted(inst.r, inst.i)
+			return p.hasExecuted(inst.is.ReplicaID, inst.is.InstanceNum)
 		}) {
 			return true
 		}
@@ -199,7 +199,7 @@ func TestExecuteCommandsNoFailures(t *testing.T) {
 	n := newNetwork(5)
 
 	for _, peer := range n.peers {
-		cmd := makeTestingCommand("a", "z")
+		cmd := newTestingCommand("a", "z")
 		inst := peer.onRequest(cmd)
 
 		if !n.waitExecuteInstance(inst) {
@@ -217,7 +217,7 @@ func TestExecuteCommandsMinorityFailures(t *testing.T) {
 
 	for _, peer := range n.peers {
 		if n.alive(peer) {
-			cmd := makeTestingCommand("a", "z")
+			cmd := newTestingCommand("a", "z")
 			inst := peer.onRequest(cmd)
 
 			if !n.waitExecuteInstance(inst) {
@@ -235,7 +235,7 @@ func TestExecuteCommandsMajorityFailures(t *testing.T) {
 
 	for _, peer := range n.peers {
 		if n.alive(peer) {
-			cmd := makeTestingCommand("a", "z")
+			cmd := newTestingCommand("a", "z")
 			inst := peer.onRequest(cmd)
 
 			if n.waitExecuteInstance(inst) {
@@ -257,7 +257,7 @@ func TestExecuteCommandsOneRTTReads(t *testing.T) {
 
 	var insts []*instance
 	for _, peer := range n.peers {
-		cmd := makeTestingReadCommand("a", "z")
+		cmd := newTestingReadCommand("a", "z")
 		inst := peer.onRequest(cmd)
 		insts = append(insts, inst)
 	}
@@ -281,7 +281,7 @@ func TestExecuteCommandsOneRTTDifferentKeys(t *testing.T) {
 	var insts []*instance
 	const letters = "abcde"
 	for r, peer := range n.peers {
-		cmd := makeTestingCommand(letters[int(r):int(r)+1], "")
+		cmd := newTestingCommand(letters[int(r):int(r)+1], "")
 		inst := peer.onRequest(cmd)
 		insts = append(insts, inst)
 	}
@@ -302,7 +302,7 @@ func TestExecuteSerializableCommands(t *testing.T) {
 
 	var insts []*instance
 	for _, peer := range n.peers {
-		cmd := makeTestingCommand("a", "z")
+		cmd := newTestingCommand("a", "z")
 		inst := peer.onRequest(cmd)
 		insts = append(insts, inst)
 	}

@@ -11,9 +11,8 @@
 	It has these top-level messages:
 		Span
 		Command
-		Dependency
-		InstanceMeta
-		InstanceState
+		InstanceID
+		InstanceData
 		PreAccept
 		PreAcceptOK
 		PreAcceptReply
@@ -22,6 +21,8 @@
 		Commit
 		Ballot
 		Message
+		InstanceState
+		HardState
 */
 package epaxospb
 
@@ -42,6 +43,38 @@ var _ = math.Inf
 // A compilation error at this line likely means your copy of the
 // proto package needs to be updated.
 const _ = proto.GoGoProtoPackageIsVersion2 // please upgrade the proto package
+
+type InstanceState_Status int32
+
+const (
+	InstanceState_None        InstanceState_Status = 0
+	InstanceState_PreAccepted InstanceState_Status = 1
+	InstanceState_Accepted    InstanceState_Status = 2
+	InstanceState_Committed   InstanceState_Status = 3
+	InstanceState_Executed    InstanceState_Status = 4
+)
+
+var InstanceState_Status_name = map[int32]string{
+	0: "None",
+	1: "PreAccepted",
+	2: "Accepted",
+	3: "Committed",
+	4: "Executed",
+}
+var InstanceState_Status_value = map[string]int32{
+	"None":        0,
+	"PreAccepted": 1,
+	"Accepted":    2,
+	"Committed":   3,
+	"Executed":    4,
+}
+
+func (x InstanceState_Status) String() string {
+	return proto.EnumName(InstanceState_Status_name, int32(x))
+}
+func (InstanceState_Status) EnumDescriptor() ([]byte, []int) {
+	return fileDescriptorEpaxos, []int{12, 0}
+}
 
 // Span represents a span of Keys that a Command operates on.
 type Span struct {
@@ -112,80 +145,56 @@ func (m *Command) GetData() []byte {
 	return nil
 }
 
-type Dependency struct {
+type InstanceID struct {
 	ReplicaID   ReplicaID   `protobuf:"varint,1,opt,name=replica_id,json=replicaId,proto3,casttype=ReplicaID" json:"replica_id,omitempty"`
 	InstanceNum InstanceNum `protobuf:"varint,2,opt,name=instance_num,json=instanceNum,proto3,casttype=InstanceNum" json:"instance_num,omitempty"`
 }
 
-func (m *Dependency) Reset()                    { *m = Dependency{} }
-func (m *Dependency) String() string            { return proto.CompactTextString(m) }
-func (*Dependency) ProtoMessage()               {}
-func (*Dependency) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{2} }
+func (m *InstanceID) Reset()                    { *m = InstanceID{} }
+func (m *InstanceID) String() string            { return proto.CompactTextString(m) }
+func (*InstanceID) ProtoMessage()               {}
+func (*InstanceID) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{2} }
 
-func (m *Dependency) GetReplicaID() ReplicaID {
+func (m *InstanceID) GetReplicaID() ReplicaID {
 	if m != nil {
 		return m.ReplicaID
 	}
 	return 0
 }
 
-func (m *Dependency) GetInstanceNum() InstanceNum {
+func (m *InstanceID) GetInstanceNum() InstanceNum {
 	if m != nil {
 		return m.InstanceNum
 	}
 	return 0
 }
 
-type InstanceMeta struct {
-	Replica     ReplicaID   `protobuf:"varint,1,opt,name=replica,proto3,casttype=ReplicaID" json:"replica,omitempty"`
-	InstanceNum InstanceNum `protobuf:"varint,2,opt,name=instance_num,json=instanceNum,proto3,casttype=InstanceNum" json:"instance_num,omitempty"`
-}
-
-func (m *InstanceMeta) Reset()                    { *m = InstanceMeta{} }
-func (m *InstanceMeta) String() string            { return proto.CompactTextString(m) }
-func (*InstanceMeta) ProtoMessage()               {}
-func (*InstanceMeta) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{3} }
-
-func (m *InstanceMeta) GetReplica() ReplicaID {
-	if m != nil {
-		return m.Replica
-	}
-	return 0
-}
-
-func (m *InstanceMeta) GetInstanceNum() InstanceNum {
-	if m != nil {
-		return m.InstanceNum
-	}
-	return 0
-}
-
-type InstanceState struct {
+type InstanceData struct {
 	Command *Command     `protobuf:"bytes,1,opt,name=command" json:"command,omitempty"`
 	SeqNum  SeqNum       `protobuf:"varint,2,opt,name=seq_num,json=seqNum,proto3,casttype=SeqNum" json:"seq_num,omitempty"`
-	Deps    []Dependency `protobuf:"bytes,3,rep,name=deps" json:"deps"`
+	Deps    []InstanceID `protobuf:"bytes,3,rep,name=deps" json:"deps"`
 }
 
-func (m *InstanceState) Reset()                    { *m = InstanceState{} }
-func (m *InstanceState) String() string            { return proto.CompactTextString(m) }
-func (*InstanceState) ProtoMessage()               {}
-func (*InstanceState) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{4} }
+func (m *InstanceData) Reset()                    { *m = InstanceData{} }
+func (m *InstanceData) String() string            { return proto.CompactTextString(m) }
+func (*InstanceData) ProtoMessage()               {}
+func (*InstanceData) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{3} }
 
-func (m *InstanceState) GetCommand() *Command {
+func (m *InstanceData) GetCommand() *Command {
 	if m != nil {
 		return m.Command
 	}
 	return nil
 }
 
-func (m *InstanceState) GetSeqNum() SeqNum {
+func (m *InstanceData) GetSeqNum() SeqNum {
 	if m != nil {
 		return m.SeqNum
 	}
 	return 0
 }
 
-func (m *InstanceState) GetDeps() []Dependency {
+func (m *InstanceData) GetDeps() []InstanceID {
 	if m != nil {
 		return m.Deps
 	}
@@ -193,13 +202,13 @@ func (m *InstanceState) GetDeps() []Dependency {
 }
 
 type PreAccept struct {
-	InstanceState `protobuf:"bytes,1,opt,name=state,embedded=state" json:"state"`
+	InstanceData `protobuf:"bytes,1,opt,name=data,embedded=data" json:"data"`
 }
 
 func (m *PreAccept) Reset()                    { *m = PreAccept{} }
 func (m *PreAccept) String() string            { return proto.CompactTextString(m) }
 func (*PreAccept) ProtoMessage()               {}
-func (*PreAccept) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{5} }
+func (*PreAccept) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{4} }
 
 // PreAcceptOK is used to respond to a PreAccept message is cases where the
 // remote replica has no new information about the proposed command.
@@ -209,20 +218,20 @@ type PreAcceptOK struct {
 func (m *PreAcceptOK) Reset()                    { *m = PreAcceptOK{} }
 func (m *PreAcceptOK) String() string            { return proto.CompactTextString(m) }
 func (*PreAcceptOK) ProtoMessage()               {}
-func (*PreAcceptOK) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{6} }
+func (*PreAcceptOK) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{5} }
 
 // PreAcceptReply is used to respond to a PreAccept message in cases whe the
 // remote replica has new information about the proposed command. This new
 // information may either be a larger sequence number or extra dependencies.
 type PreAcceptReply struct {
 	UpdatedSeqNum SeqNum       `protobuf:"varint,1,opt,name=updated_seq_num,json=updatedSeqNum,proto3,casttype=SeqNum" json:"updated_seq_num,omitempty"`
-	UpdatedDeps   []Dependency `protobuf:"bytes,2,rep,name=updated_deps,json=updatedDeps" json:"updated_deps"`
+	UpdatedDeps   []InstanceID `protobuf:"bytes,2,rep,name=updated_deps,json=updatedDeps" json:"updated_deps"`
 }
 
 func (m *PreAcceptReply) Reset()                    { *m = PreAcceptReply{} }
 func (m *PreAcceptReply) String() string            { return proto.CompactTextString(m) }
 func (*PreAcceptReply) ProtoMessage()               {}
-func (*PreAcceptReply) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{7} }
+func (*PreAcceptReply) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{6} }
 
 func (m *PreAcceptReply) GetUpdatedSeqNum() SeqNum {
 	if m != nil {
@@ -231,7 +240,7 @@ func (m *PreAcceptReply) GetUpdatedSeqNum() SeqNum {
 	return 0
 }
 
-func (m *PreAcceptReply) GetUpdatedDeps() []Dependency {
+func (m *PreAcceptReply) GetUpdatedDeps() []InstanceID {
 	if m != nil {
 		return m.UpdatedDeps
 	}
@@ -239,13 +248,13 @@ func (m *PreAcceptReply) GetUpdatedDeps() []Dependency {
 }
 
 type Accept struct {
-	InstanceState `protobuf:"bytes,1,opt,name=state,embedded=state" json:"state"`
+	InstanceData `protobuf:"bytes,1,opt,name=data,embedded=data" json:"data"`
 }
 
 func (m *Accept) Reset()                    { *m = Accept{} }
 func (m *Accept) String() string            { return proto.CompactTextString(m) }
 func (*Accept) ProtoMessage()               {}
-func (*Accept) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{8} }
+func (*Accept) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{7} }
 
 type AcceptOK struct {
 }
@@ -253,28 +262,28 @@ type AcceptOK struct {
 func (m *AcceptOK) Reset()                    { *m = AcceptOK{} }
 func (m *AcceptOK) String() string            { return proto.CompactTextString(m) }
 func (*AcceptOK) ProtoMessage()               {}
-func (*AcceptOK) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{9} }
+func (*AcceptOK) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{8} }
 
 type Commit struct {
-	InstanceState `protobuf:"bytes,1,opt,name=state,embedded=state" json:"state"`
+	InstanceData `protobuf:"bytes,1,opt,name=data,embedded=data" json:"data"`
 }
 
 func (m *Commit) Reset()                    { *m = Commit{} }
 func (m *Commit) String() string            { return proto.CompactTextString(m) }
 func (*Commit) ProtoMessage()               {}
-func (*Commit) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{10} }
+func (*Commit) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{9} }
 
 // Ballot is a ballot number that ensures message freshness.
 type Ballot struct {
-	Epoch     uint64    `protobuf:"varint,1,opt,name=Epoch,json=epoch,proto3" json:"Epoch,omitempty"`
-	Number    uint64    `protobuf:"varint,2,opt,name=Number,json=number,proto3" json:"Number,omitempty"`
-	ReplicaID ReplicaID `protobuf:"varint,3,opt,name=ReplicaID,json=replicaID,proto3,casttype=ReplicaID" json:"ReplicaID,omitempty"`
+	Epoch     uint64    `protobuf:"varint,1,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	Number    uint64    `protobuf:"varint,2,opt,name=number,proto3" json:"number,omitempty"`
+	ReplicaID ReplicaID `protobuf:"varint,3,opt,name=replica_id,json=replicaId,proto3,casttype=ReplicaID" json:"replica_id,omitempty"`
 }
 
 func (m *Ballot) Reset()                    { *m = Ballot{} }
 func (m *Ballot) String() string            { return proto.CompactTextString(m) }
 func (*Ballot) ProtoMessage()               {}
-func (*Ballot) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{11} }
+func (*Ballot) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{10} }
 
 func (m *Ballot) GetEpoch() uint64 {
 	if m != nil {
@@ -303,7 +312,7 @@ type Message struct {
 	// ballot is the message's ballot number.
 	Ballot Ballot `protobuf:"bytes,2,opt,name=ballot" json:"ballot"`
 	// instance_meta holds information of the message's corresponding instance.
-	InstanceMeta InstanceMeta `protobuf:"bytes,3,opt,name=instance_meta,json=instanceMeta" json:"instance_meta"`
+	InstanceID InstanceID `protobuf:"bytes,3,opt,name=instance_id,json=instanceId" json:"instance_id"`
 	// type is a union of different message types.
 	//
 	// Types that are valid to be assigned to Type:
@@ -319,7 +328,7 @@ type Message struct {
 func (m *Message) Reset()                    { *m = Message{} }
 func (m *Message) String() string            { return proto.CompactTextString(m) }
 func (*Message) ProtoMessage()               {}
-func (*Message) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{12} }
+func (*Message) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{11} }
 
 type isMessage_Type interface {
 	isMessage_Type()
@@ -374,11 +383,11 @@ func (m *Message) GetBallot() Ballot {
 	return Ballot{}
 }
 
-func (m *Message) GetInstanceMeta() InstanceMeta {
+func (m *Message) GetInstanceID() InstanceID {
 	if m != nil {
-		return m.InstanceMeta
+		return m.InstanceID
 	}
-	return InstanceMeta{}
+	return InstanceID{}
 }
 
 func (m *Message) GetPreAccept() *PreAccept {
@@ -573,12 +582,83 @@ func _Message_OneofSizer(msg proto.Message) (n int) {
 	return n
 }
 
+type InstanceState struct {
+	InstanceID   `protobuf:"bytes,1,opt,name=meta,embedded=meta" json:"meta"`
+	Status       InstanceState_Status `protobuf:"varint,2,opt,name=status,proto3,enum=epaxospb.InstanceState_Status" json:"status,omitempty"`
+	InstanceData `protobuf:"bytes,3,opt,name=data,embedded=data" json:"data"`
+	Ballot       *Ballot `protobuf:"bytes,4,opt,name=ballot" json:"ballot,omitempty"`
+}
+
+func (m *InstanceState) Reset()                    { *m = InstanceState{} }
+func (m *InstanceState) String() string            { return proto.CompactTextString(m) }
+func (*InstanceState) ProtoMessage()               {}
+func (*InstanceState) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{12} }
+
+func (m *InstanceState) GetStatus() InstanceState_Status {
+	if m != nil {
+		return m.Status
+	}
+	return InstanceState_None
+}
+
+func (m *InstanceState) GetBallot() *Ballot {
+	if m != nil {
+		return m.Ballot
+	}
+	return nil
+}
+
+type HardState struct {
+	// replica_id is the unique identifier for this node.
+	ReplicaID ReplicaID `protobuf:"varint,1,opt,name=replica_id,json=replicaId,proto3,casttype=ReplicaID" json:"replica_id,omitempty"`
+	// nodes is the set of all nodes in the EPaxos network.
+	Nodes []ReplicaID `protobuf:"varint,2,rep,packed,name=nodes,casttype=ReplicaID" json:"nodes,omitempty"`
+	// truncated_instance_nums is a mapping from ReplicaID to the current
+	// InstanceNum truncation index.
+	TruncatedInstanceNums map[ReplicaID]InstanceNum `protobuf:"bytes,3,rep,name=truncated_instance_nums,json=truncatedInstanceNums,castkey=ReplicaID,castvalue=InstanceNum" json:"truncated_instance_nums,omitempty" protobuf_key:"varint,1,opt,name=key,proto3" protobuf_val:"varint,2,opt,name=value,proto3"`
+	// truncated_seq_num is the largest sequence number that has been
+	// truncated on this node.
+	TruncatedSeqNum SeqNum `protobuf:"varint,4,opt,name=truncated_seq_num,json=truncatedSeqNum,proto3,casttype=SeqNum" json:"truncated_seq_num,omitempty"`
+}
+
+func (m *HardState) Reset()                    { *m = HardState{} }
+func (m *HardState) String() string            { return proto.CompactTextString(m) }
+func (*HardState) ProtoMessage()               {}
+func (*HardState) Descriptor() ([]byte, []int) { return fileDescriptorEpaxos, []int{13} }
+
+func (m *HardState) GetReplicaID() ReplicaID {
+	if m != nil {
+		return m.ReplicaID
+	}
+	return 0
+}
+
+func (m *HardState) GetNodes() []ReplicaID {
+	if m != nil {
+		return m.Nodes
+	}
+	return nil
+}
+
+func (m *HardState) GetTruncatedInstanceNums() map[ReplicaID]InstanceNum {
+	if m != nil {
+		return m.TruncatedInstanceNums
+	}
+	return nil
+}
+
+func (m *HardState) GetTruncatedSeqNum() SeqNum {
+	if m != nil {
+		return m.TruncatedSeqNum
+	}
+	return 0
+}
+
 func init() {
 	proto.RegisterType((*Span)(nil), "epaxospb.Span")
 	proto.RegisterType((*Command)(nil), "epaxospb.Command")
-	proto.RegisterType((*Dependency)(nil), "epaxospb.Dependency")
-	proto.RegisterType((*InstanceMeta)(nil), "epaxospb.InstanceMeta")
-	proto.RegisterType((*InstanceState)(nil), "epaxospb.InstanceState")
+	proto.RegisterType((*InstanceID)(nil), "epaxospb.InstanceID")
+	proto.RegisterType((*InstanceData)(nil), "epaxospb.InstanceData")
 	proto.RegisterType((*PreAccept)(nil), "epaxospb.PreAccept")
 	proto.RegisterType((*PreAcceptOK)(nil), "epaxospb.PreAcceptOK")
 	proto.RegisterType((*PreAcceptReply)(nil), "epaxospb.PreAcceptReply")
@@ -587,6 +667,9 @@ func init() {
 	proto.RegisterType((*Commit)(nil), "epaxospb.Commit")
 	proto.RegisterType((*Ballot)(nil), "epaxospb.Ballot")
 	proto.RegisterType((*Message)(nil), "epaxospb.Message")
+	proto.RegisterType((*InstanceState)(nil), "epaxospb.InstanceState")
+	proto.RegisterType((*HardState)(nil), "epaxospb.HardState")
+	proto.RegisterEnum("epaxospb.InstanceState_Status", InstanceState_Status_name, InstanceState_Status_value)
 }
 func (m *Span) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
@@ -665,7 +748,7 @@ func (m *Command) MarshalTo(dAtA []byte) (int, error) {
 	return i, nil
 }
 
-func (m *Dependency) Marshal() (dAtA []byte, err error) {
+func (m *InstanceID) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
 	n, err := m.MarshalTo(dAtA)
@@ -675,7 +758,7 @@ func (m *Dependency) Marshal() (dAtA []byte, err error) {
 	return dAtA[:n], nil
 }
 
-func (m *Dependency) MarshalTo(dAtA []byte) (int, error) {
+func (m *InstanceID) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
@@ -693,7 +776,7 @@ func (m *Dependency) MarshalTo(dAtA []byte) (int, error) {
 	return i, nil
 }
 
-func (m *InstanceMeta) Marshal() (dAtA []byte, err error) {
+func (m *InstanceData) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
 	n, err := m.MarshalTo(dAtA)
@@ -703,35 +786,7 @@ func (m *InstanceMeta) Marshal() (dAtA []byte, err error) {
 	return dAtA[:n], nil
 }
 
-func (m *InstanceMeta) MarshalTo(dAtA []byte) (int, error) {
-	var i int
-	_ = i
-	var l int
-	_ = l
-	if m.Replica != 0 {
-		dAtA[i] = 0x8
-		i++
-		i = encodeVarintEpaxos(dAtA, i, uint64(m.Replica))
-	}
-	if m.InstanceNum != 0 {
-		dAtA[i] = 0x10
-		i++
-		i = encodeVarintEpaxos(dAtA, i, uint64(m.InstanceNum))
-	}
-	return i, nil
-}
-
-func (m *InstanceState) Marshal() (dAtA []byte, err error) {
-	size := m.Size()
-	dAtA = make([]byte, size)
-	n, err := m.MarshalTo(dAtA)
-	if err != nil {
-		return nil, err
-	}
-	return dAtA[:n], nil
-}
-
-func (m *InstanceState) MarshalTo(dAtA []byte) (int, error) {
+func (m *InstanceData) MarshalTo(dAtA []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
@@ -783,8 +838,8 @@ func (m *PreAccept) MarshalTo(dAtA []byte) (int, error) {
 	_ = l
 	dAtA[i] = 0xa
 	i++
-	i = encodeVarintEpaxos(dAtA, i, uint64(m.InstanceState.Size()))
-	n3, err := m.InstanceState.MarshalTo(dAtA[i:])
+	i = encodeVarintEpaxos(dAtA, i, uint64(m.InstanceData.Size()))
+	n3, err := m.InstanceData.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
@@ -862,8 +917,8 @@ func (m *Accept) MarshalTo(dAtA []byte) (int, error) {
 	_ = l
 	dAtA[i] = 0xa
 	i++
-	i = encodeVarintEpaxos(dAtA, i, uint64(m.InstanceState.Size()))
-	n4, err := m.InstanceState.MarshalTo(dAtA[i:])
+	i = encodeVarintEpaxos(dAtA, i, uint64(m.InstanceData.Size()))
+	n4, err := m.InstanceData.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
@@ -906,8 +961,8 @@ func (m *Commit) MarshalTo(dAtA []byte) (int, error) {
 	_ = l
 	dAtA[i] = 0xa
 	i++
-	i = encodeVarintEpaxos(dAtA, i, uint64(m.InstanceState.Size()))
-	n5, err := m.InstanceState.MarshalTo(dAtA[i:])
+	i = encodeVarintEpaxos(dAtA, i, uint64(m.InstanceData.Size()))
+	n5, err := m.InstanceData.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
@@ -978,8 +1033,8 @@ func (m *Message) MarshalTo(dAtA []byte) (int, error) {
 	i += n6
 	dAtA[i] = 0x1a
 	i++
-	i = encodeVarintEpaxos(dAtA, i, uint64(m.InstanceMeta.Size()))
-	n7, err := m.InstanceMeta.MarshalTo(dAtA[i:])
+	i = encodeVarintEpaxos(dAtA, i, uint64(m.InstanceID.Size()))
+	n7, err := m.InstanceID.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
@@ -1078,6 +1133,115 @@ func (m *Message_Commit) MarshalTo(dAtA []byte) (int, error) {
 	}
 	return i, nil
 }
+func (m *InstanceState) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *InstanceState) MarshalTo(dAtA []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	dAtA[i] = 0xa
+	i++
+	i = encodeVarintEpaxos(dAtA, i, uint64(m.InstanceID.Size()))
+	n15, err := m.InstanceID.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n15
+	if m.Status != 0 {
+		dAtA[i] = 0x10
+		i++
+		i = encodeVarintEpaxos(dAtA, i, uint64(m.Status))
+	}
+	dAtA[i] = 0x1a
+	i++
+	i = encodeVarintEpaxos(dAtA, i, uint64(m.InstanceData.Size()))
+	n16, err := m.InstanceData.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n16
+	if m.Ballot != nil {
+		dAtA[i] = 0x22
+		i++
+		i = encodeVarintEpaxos(dAtA, i, uint64(m.Ballot.Size()))
+		n17, err := m.Ballot.MarshalTo(dAtA[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n17
+	}
+	return i, nil
+}
+
+func (m *HardState) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *HardState) MarshalTo(dAtA []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	if m.ReplicaID != 0 {
+		dAtA[i] = 0x8
+		i++
+		i = encodeVarintEpaxos(dAtA, i, uint64(m.ReplicaID))
+	}
+	if len(m.Nodes) > 0 {
+		dAtA19 := make([]byte, len(m.Nodes)*10)
+		var j18 int
+		for _, num := range m.Nodes {
+			for num >= 1<<7 {
+				dAtA19[j18] = uint8(uint64(num)&0x7f | 0x80)
+				num >>= 7
+				j18++
+			}
+			dAtA19[j18] = uint8(num)
+			j18++
+		}
+		dAtA[i] = 0x12
+		i++
+		i = encodeVarintEpaxos(dAtA, i, uint64(j18))
+		i += copy(dAtA[i:], dAtA19[:j18])
+	}
+	if len(m.TruncatedInstanceNums) > 0 {
+		for k, _ := range m.TruncatedInstanceNums {
+			dAtA[i] = 0x1a
+			i++
+			v := m.TruncatedInstanceNums[k]
+			mapSize := 1 + sovEpaxos(uint64(k)) + 1 + sovEpaxos(uint64(v))
+			i = encodeVarintEpaxos(dAtA, i, uint64(mapSize))
+			dAtA[i] = 0x8
+			i++
+			i = encodeVarintEpaxos(dAtA, i, uint64(k))
+			dAtA[i] = 0x10
+			i++
+			i = encodeVarintEpaxos(dAtA, i, uint64(v))
+		}
+	}
+	if m.TruncatedSeqNum != 0 {
+		dAtA[i] = 0x20
+		i++
+		i = encodeVarintEpaxos(dAtA, i, uint64(m.TruncatedSeqNum))
+	}
+	return i, nil
+}
+
 func encodeFixed64Epaxos(dAtA []byte, offset int, v uint64) int {
 	dAtA[offset] = uint8(v)
 	dAtA[offset+1] = uint8(v >> 8)
@@ -1137,7 +1301,7 @@ func (m *Command) Size() (n int) {
 	return n
 }
 
-func (m *Dependency) Size() (n int) {
+func (m *InstanceID) Size() (n int) {
 	var l int
 	_ = l
 	if m.ReplicaID != 0 {
@@ -1149,19 +1313,7 @@ func (m *Dependency) Size() (n int) {
 	return n
 }
 
-func (m *InstanceMeta) Size() (n int) {
-	var l int
-	_ = l
-	if m.Replica != 0 {
-		n += 1 + sovEpaxos(uint64(m.Replica))
-	}
-	if m.InstanceNum != 0 {
-		n += 1 + sovEpaxos(uint64(m.InstanceNum))
-	}
-	return n
-}
-
-func (m *InstanceState) Size() (n int) {
+func (m *InstanceData) Size() (n int) {
 	var l int
 	_ = l
 	if m.Command != nil {
@@ -1183,7 +1335,7 @@ func (m *InstanceState) Size() (n int) {
 func (m *PreAccept) Size() (n int) {
 	var l int
 	_ = l
-	l = m.InstanceState.Size()
+	l = m.InstanceData.Size()
 	n += 1 + l + sovEpaxos(uint64(l))
 	return n
 }
@@ -1212,7 +1364,7 @@ func (m *PreAcceptReply) Size() (n int) {
 func (m *Accept) Size() (n int) {
 	var l int
 	_ = l
-	l = m.InstanceState.Size()
+	l = m.InstanceData.Size()
 	n += 1 + l + sovEpaxos(uint64(l))
 	return n
 }
@@ -1226,7 +1378,7 @@ func (m *AcceptOK) Size() (n int) {
 func (m *Commit) Size() (n int) {
 	var l int
 	_ = l
-	l = m.InstanceState.Size()
+	l = m.InstanceData.Size()
 	n += 1 + l + sovEpaxos(uint64(l))
 	return n
 }
@@ -1254,7 +1406,7 @@ func (m *Message) Size() (n int) {
 	}
 	l = m.Ballot.Size()
 	n += 1 + l + sovEpaxos(uint64(l))
-	l = m.InstanceMeta.Size()
+	l = m.InstanceID.Size()
 	n += 1 + l + sovEpaxos(uint64(l))
 	if m.Type != nil {
 		n += m.Type.Size()
@@ -1313,6 +1465,49 @@ func (m *Message_Commit) Size() (n int) {
 	if m.Commit != nil {
 		l = m.Commit.Size()
 		n += 1 + l + sovEpaxos(uint64(l))
+	}
+	return n
+}
+func (m *InstanceState) Size() (n int) {
+	var l int
+	_ = l
+	l = m.InstanceID.Size()
+	n += 1 + l + sovEpaxos(uint64(l))
+	if m.Status != 0 {
+		n += 1 + sovEpaxos(uint64(m.Status))
+	}
+	l = m.InstanceData.Size()
+	n += 1 + l + sovEpaxos(uint64(l))
+	if m.Ballot != nil {
+		l = m.Ballot.Size()
+		n += 1 + l + sovEpaxos(uint64(l))
+	}
+	return n
+}
+
+func (m *HardState) Size() (n int) {
+	var l int
+	_ = l
+	if m.ReplicaID != 0 {
+		n += 1 + sovEpaxos(uint64(m.ReplicaID))
+	}
+	if len(m.Nodes) > 0 {
+		l = 0
+		for _, e := range m.Nodes {
+			l += sovEpaxos(uint64(e))
+		}
+		n += 1 + sovEpaxos(uint64(l)) + l
+	}
+	if len(m.TruncatedInstanceNums) > 0 {
+		for k, v := range m.TruncatedInstanceNums {
+			_ = k
+			_ = v
+			mapEntrySize := 1 + sovEpaxos(uint64(k)) + 1 + sovEpaxos(uint64(v))
+			n += mapEntrySize + 1 + sovEpaxos(uint64(mapEntrySize))
+		}
+	}
+	if m.TruncatedSeqNum != 0 {
+		n += 1 + sovEpaxos(uint64(m.TruncatedSeqNum))
 	}
 	return n
 }
@@ -1592,7 +1787,7 @@ func (m *Command) Unmarshal(dAtA []byte) error {
 	}
 	return nil
 }
-func (m *Dependency) Unmarshal(dAtA []byte) error {
+func (m *InstanceID) Unmarshal(dAtA []byte) error {
 	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
@@ -1615,10 +1810,10 @@ func (m *Dependency) Unmarshal(dAtA []byte) error {
 		fieldNum := int32(wire >> 3)
 		wireType := int(wire & 0x7)
 		if wireType == 4 {
-			return fmt.Errorf("proto: Dependency: wiretype end group for non-group")
+			return fmt.Errorf("proto: InstanceID: wiretype end group for non-group")
 		}
 		if fieldNum <= 0 {
-			return fmt.Errorf("proto: Dependency: illegal tag %d (wire type %d)", fieldNum, wire)
+			return fmt.Errorf("proto: InstanceID: illegal tag %d (wire type %d)", fieldNum, wire)
 		}
 		switch fieldNum {
 		case 1:
@@ -1680,7 +1875,7 @@ func (m *Dependency) Unmarshal(dAtA []byte) error {
 	}
 	return nil
 }
-func (m *InstanceMeta) Unmarshal(dAtA []byte) error {
+func (m *InstanceData) Unmarshal(dAtA []byte) error {
 	l := len(dAtA)
 	iNdEx := 0
 	for iNdEx < l {
@@ -1703,98 +1898,10 @@ func (m *InstanceMeta) Unmarshal(dAtA []byte) error {
 		fieldNum := int32(wire >> 3)
 		wireType := int(wire & 0x7)
 		if wireType == 4 {
-			return fmt.Errorf("proto: InstanceMeta: wiretype end group for non-group")
+			return fmt.Errorf("proto: InstanceData: wiretype end group for non-group")
 		}
 		if fieldNum <= 0 {
-			return fmt.Errorf("proto: InstanceMeta: illegal tag %d (wire type %d)", fieldNum, wire)
-		}
-		switch fieldNum {
-		case 1:
-			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Replica", wireType)
-			}
-			m.Replica = 0
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowEpaxos
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				m.Replica |= (ReplicaID(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-		case 2:
-			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field InstanceNum", wireType)
-			}
-			m.InstanceNum = 0
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowEpaxos
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				m.InstanceNum |= (InstanceNum(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-		default:
-			iNdEx = preIndex
-			skippy, err := skipEpaxos(dAtA[iNdEx:])
-			if err != nil {
-				return err
-			}
-			if skippy < 0 {
-				return ErrInvalidLengthEpaxos
-			}
-			if (iNdEx + skippy) > l {
-				return io.ErrUnexpectedEOF
-			}
-			iNdEx += skippy
-		}
-	}
-
-	if iNdEx > l {
-		return io.ErrUnexpectedEOF
-	}
-	return nil
-}
-func (m *InstanceState) Unmarshal(dAtA []byte) error {
-	l := len(dAtA)
-	iNdEx := 0
-	for iNdEx < l {
-		preIndex := iNdEx
-		var wire uint64
-		for shift := uint(0); ; shift += 7 {
-			if shift >= 64 {
-				return ErrIntOverflowEpaxos
-			}
-			if iNdEx >= l {
-				return io.ErrUnexpectedEOF
-			}
-			b := dAtA[iNdEx]
-			iNdEx++
-			wire |= (uint64(b) & 0x7F) << shift
-			if b < 0x80 {
-				break
-			}
-		}
-		fieldNum := int32(wire >> 3)
-		wireType := int(wire & 0x7)
-		if wireType == 4 {
-			return fmt.Errorf("proto: InstanceState: wiretype end group for non-group")
-		}
-		if fieldNum <= 0 {
-			return fmt.Errorf("proto: InstanceState: illegal tag %d (wire type %d)", fieldNum, wire)
+			return fmt.Errorf("proto: InstanceData: illegal tag %d (wire type %d)", fieldNum, wire)
 		}
 		switch fieldNum {
 		case 1:
@@ -1875,7 +1982,7 @@ func (m *InstanceState) Unmarshal(dAtA []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.Deps = append(m.Deps, Dependency{})
+			m.Deps = append(m.Deps, InstanceID{})
 			if err := m.Deps[len(m.Deps)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
@@ -1932,7 +2039,7 @@ func (m *PreAccept) Unmarshal(dAtA []byte) error {
 		switch fieldNum {
 		case 1:
 			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field InstanceState", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field InstanceData", wireType)
 			}
 			var msglen int
 			for shift := uint(0); ; shift += 7 {
@@ -1956,7 +2063,7 @@ func (m *PreAccept) Unmarshal(dAtA []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.InstanceState.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+			if err := m.InstanceData.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -2105,7 +2212,7 @@ func (m *PreAcceptReply) Unmarshal(dAtA []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.UpdatedDeps = append(m.UpdatedDeps, Dependency{})
+			m.UpdatedDeps = append(m.UpdatedDeps, InstanceID{})
 			if err := m.UpdatedDeps[len(m.UpdatedDeps)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
@@ -2162,7 +2269,7 @@ func (m *Accept) Unmarshal(dAtA []byte) error {
 		switch fieldNum {
 		case 1:
 			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field InstanceState", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field InstanceData", wireType)
 			}
 			var msglen int
 			for shift := uint(0); ; shift += 7 {
@@ -2186,7 +2293,7 @@ func (m *Accept) Unmarshal(dAtA []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.InstanceState.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+			if err := m.InstanceData.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -2292,7 +2399,7 @@ func (m *Commit) Unmarshal(dAtA []byte) error {
 		switch fieldNum {
 		case 1:
 			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field InstanceState", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field InstanceData", wireType)
 			}
 			var msglen int
 			for shift := uint(0); ; shift += 7 {
@@ -2316,7 +2423,7 @@ func (m *Commit) Unmarshal(dAtA []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.InstanceState.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+			if err := m.InstanceData.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -2528,7 +2635,7 @@ func (m *Message) Unmarshal(dAtA []byte) error {
 			iNdEx = postIndex
 		case 3:
 			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field InstanceMeta", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field InstanceID", wireType)
 			}
 			var msglen int
 			for shift := uint(0); ; shift += 7 {
@@ -2552,7 +2659,7 @@ func (m *Message) Unmarshal(dAtA []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := m.InstanceMeta.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+			if err := m.InstanceID.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -2769,6 +2876,414 @@ func (m *Message) Unmarshal(dAtA []byte) error {
 	}
 	return nil
 }
+func (m *InstanceState) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowEpaxos
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: InstanceState: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: InstanceState: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field InstanceID", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowEpaxos
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthEpaxos
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.InstanceID.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Status", wireType)
+			}
+			m.Status = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowEpaxos
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Status |= (InstanceState_Status(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field InstanceData", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowEpaxos
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthEpaxos
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.InstanceData.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 4:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Ballot", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowEpaxos
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthEpaxos
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.Ballot == nil {
+				m.Ballot = &Ballot{}
+			}
+			if err := m.Ballot.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipEpaxos(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthEpaxos
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *HardState) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowEpaxos
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: HardState: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: HardState: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ReplicaID", wireType)
+			}
+			m.ReplicaID = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowEpaxos
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.ReplicaID |= (ReplicaID(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 2:
+			if wireType == 0 {
+				var v ReplicaID
+				for shift := uint(0); ; shift += 7 {
+					if shift >= 64 {
+						return ErrIntOverflowEpaxos
+					}
+					if iNdEx >= l {
+						return io.ErrUnexpectedEOF
+					}
+					b := dAtA[iNdEx]
+					iNdEx++
+					v |= (ReplicaID(b) & 0x7F) << shift
+					if b < 0x80 {
+						break
+					}
+				}
+				m.Nodes = append(m.Nodes, v)
+			} else if wireType == 2 {
+				var packedLen int
+				for shift := uint(0); ; shift += 7 {
+					if shift >= 64 {
+						return ErrIntOverflowEpaxos
+					}
+					if iNdEx >= l {
+						return io.ErrUnexpectedEOF
+					}
+					b := dAtA[iNdEx]
+					iNdEx++
+					packedLen |= (int(b) & 0x7F) << shift
+					if b < 0x80 {
+						break
+					}
+				}
+				if packedLen < 0 {
+					return ErrInvalidLengthEpaxos
+				}
+				postIndex := iNdEx + packedLen
+				if postIndex > l {
+					return io.ErrUnexpectedEOF
+				}
+				for iNdEx < postIndex {
+					var v ReplicaID
+					for shift := uint(0); ; shift += 7 {
+						if shift >= 64 {
+							return ErrIntOverflowEpaxos
+						}
+						if iNdEx >= l {
+							return io.ErrUnexpectedEOF
+						}
+						b := dAtA[iNdEx]
+						iNdEx++
+						v |= (ReplicaID(b) & 0x7F) << shift
+						if b < 0x80 {
+							break
+						}
+					}
+					m.Nodes = append(m.Nodes, v)
+				}
+			} else {
+				return fmt.Errorf("proto: wrong wireType = %d for field Nodes", wireType)
+			}
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field TruncatedInstanceNums", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowEpaxos
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthEpaxos
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			var keykey uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowEpaxos
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				keykey |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			var mapkey uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowEpaxos
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				mapkey |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if m.TruncatedInstanceNums == nil {
+				m.TruncatedInstanceNums = make(map[ReplicaID]InstanceNum)
+			}
+			if iNdEx < postIndex {
+				var valuekey uint64
+				for shift := uint(0); ; shift += 7 {
+					if shift >= 64 {
+						return ErrIntOverflowEpaxos
+					}
+					if iNdEx >= l {
+						return io.ErrUnexpectedEOF
+					}
+					b := dAtA[iNdEx]
+					iNdEx++
+					valuekey |= (uint64(b) & 0x7F) << shift
+					if b < 0x80 {
+						break
+					}
+				}
+				var mapvalue uint64
+				for shift := uint(0); ; shift += 7 {
+					if shift >= 64 {
+						return ErrIntOverflowEpaxos
+					}
+					if iNdEx >= l {
+						return io.ErrUnexpectedEOF
+					}
+					b := dAtA[iNdEx]
+					iNdEx++
+					mapvalue |= (uint64(b) & 0x7F) << shift
+					if b < 0x80 {
+						break
+					}
+				}
+				m.TruncatedInstanceNums[ReplicaID(mapkey)] = ((InstanceNum)(mapvalue))
+			} else {
+				var mapvalue InstanceNum
+				m.TruncatedInstanceNums[ReplicaID(mapkey)] = mapvalue
+			}
+			iNdEx = postIndex
+		case 4:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field TruncatedSeqNum", wireType)
+			}
+			m.TruncatedSeqNum = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowEpaxos
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.TruncatedSeqNum |= (SeqNum(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		default:
+			iNdEx = preIndex
+			skippy, err := skipEpaxos(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthEpaxos
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
 func skipEpaxos(dAtA []byte) (n int, err error) {
 	l := len(dAtA)
 	iNdEx := 0
@@ -2877,53 +3392,65 @@ var (
 func init() { proto.RegisterFile("epaxos.proto", fileDescriptorEpaxos) }
 
 var fileDescriptorEpaxos = []byte{
-	// 760 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xa4, 0x55, 0xc1, 0x6e, 0xda, 0x4a,
-	0x14, 0xc5, 0x60, 0x6c, 0xb8, 0x86, 0x24, 0x6f, 0x5e, 0x5e, 0x9e, 0x5f, 0xa4, 0x87, 0x11, 0x6f,
-	0xf1, 0x50, 0xa2, 0x12, 0x95, 0x56, 0xaa, 0xda, 0xaa, 0x0b, 0x5c, 0x2a, 0x05, 0xa1, 0x24, 0x95,
-	0xf3, 0x01, 0x68, 0xb0, 0xa7, 0xc4, 0x22, 0xd8, 0x13, 0x3c, 0xa8, 0x45, 0x5d, 0x74, 0xd1, 0x1f,
-	0x68, 0x77, 0x5d, 0xf6, 0x73, 0xb2, 0xcc, 0x17, 0xa0, 0x8a, 0x2e, 0xfa, 0x0f, 0xac, 0xaa, 0x19,
-	0x8f, 0xed, 0x90, 0x44, 0xaa, 0xd4, 0xac, 0xe2, 0x3b, 0x73, 0xce, 0xbd, 0xe7, 0xde, 0x39, 0x37,
-	0x40, 0x85, 0x50, 0xfc, 0x2e, 0x8c, 0x5a, 0x74, 0x1a, 0xb2, 0x10, 0x95, 0xe2, 0x88, 0x0e, 0x77,
-	0x1f, 0x8c, 0x7c, 0x76, 0x36, 0x1b, 0xb6, 0xdc, 0x70, 0x72, 0x30, 0x0a, 0x47, 0xe1, 0x81, 0x00,
-	0x0c, 0x67, 0x6f, 0x44, 0x24, 0x02, 0xf1, 0x15, 0x13, 0x1b, 0x3d, 0x50, 0x4f, 0x29, 0x0e, 0xd0,
-	0x3f, 0x50, 0x18, 0x93, 0xb9, 0xa9, 0xd4, 0x95, 0x66, 0xc5, 0xd6, 0x57, 0x0b, 0xab, 0xd0, 0x27,
-	0x73, 0x87, 0x9f, 0xa1, 0x3a, 0xe8, 0x24, 0xf0, 0x06, 0xfc, 0x3a, 0xbf, 0x7e, 0xad, 0x91, 0xc0,
-	0xeb, 0x93, 0xf9, 0x33, 0xf5, 0xcb, 0x57, 0x2b, 0xd7, 0xf8, 0x00, 0xfa, 0xcb, 0x70, 0x32, 0xc1,
-	0x81, 0x87, 0x76, 0x20, 0xef, 0x7b, 0x22, 0x99, 0x6a, 0x6b, 0xcb, 0x85, 0x95, 0xef, 0x75, 0x9d,
-	0xbc, 0xef, 0xa1, 0x26, 0xa8, 0x11, 0xc5, 0x81, 0xc8, 0x63, 0xb4, 0x37, 0x5a, 0x89, 0xea, 0x16,
-	0xd7, 0x60, 0xab, 0x97, 0x0b, 0x2b, 0xe7, 0x08, 0x04, 0x32, 0x41, 0x7f, 0x3b, 0xf5, 0x99, 0x1f,
-	0x8c, 0xcc, 0x42, 0x5d, 0x69, 0x96, 0x9c, 0x24, 0x44, 0x08, 0x54, 0x0f, 0x33, 0x6c, 0xaa, 0x5c,
-	0x8b, 0x23, 0xbe, 0xa5, 0x80, 0xf7, 0x00, 0x5d, 0x42, 0x49, 0xe0, 0x91, 0xc0, 0x9d, 0xa3, 0xa7,
-	0x00, 0x53, 0x42, 0xcf, 0x7d, 0x17, 0x0f, 0x52, 0x2d, 0xbb, 0xcb, 0x85, 0x55, 0x76, 0xe2, 0xd3,
-	0x5e, 0x77, 0x75, 0x3d, 0x70, 0xca, 0x12, 0xdd, 0xf3, 0x50, 0x1b, 0x2a, 0x7e, 0x10, 0x31, 0x1c,
-	0xb8, 0x64, 0x10, 0xcc, 0x26, 0x42, 0xae, 0x6a, 0x6f, 0xae, 0x16, 0x96, 0xd1, 0x93, 0xe7, 0xc7,
-	0xb3, 0x89, 0x63, 0xf8, 0x59, 0xd0, 0x18, 0x43, 0x25, 0xb9, 0x3b, 0x22, 0x0c, 0xa3, 0xff, 0x41,
-	0x97, 0x09, 0x65, 0xed, 0xea, 0x7a, 0xb9, 0xe4, 0xf6, 0xb7, 0x8a, 0x7d, 0x56, 0xa0, 0x9a, 0x5c,
-	0x9e, 0x32, 0xcc, 0x08, 0xda, 0x07, 0xdd, 0x8d, 0x87, 0x2f, 0xca, 0x19, 0xed, 0x3f, 0xb2, 0xe1,
-	0xca, 0x57, 0x71, 0x12, 0x04, 0xfa, 0x0f, 0xf4, 0x88, 0x5c, 0x5c, 0xab, 0x06, 0xab, 0x85, 0xa5,
-	0x9d, 0x92, 0x0b, 0x5e, 0x48, 0x8b, 0xc4, 0x5f, 0xd4, 0x02, 0xd5, 0x23, 0x34, 0x32, 0x0b, 0xf5,
-	0x42, 0xd3, 0x68, 0x6f, 0x67, 0xe9, 0xb2, 0x19, 0x27, 0x2f, 0xc6, 0x71, 0x8d, 0x2e, 0x94, 0x5f,
-	0x4f, 0x49, 0xc7, 0x75, 0x09, 0x65, 0xe8, 0x09, 0x14, 0x23, 0xae, 0x4b, 0x8a, 0xf9, 0x3b, 0x63,
-	0xaf, 0xc9, 0xb6, 0x4b, 0x3c, 0xc1, 0xd5, 0xc2, 0x52, 0x9c, 0x18, 0xdf, 0xa8, 0x82, 0x91, 0x66,
-	0x39, 0xe9, 0x37, 0x3e, 0x2a, 0xb0, 0x91, 0xc6, 0x7c, 0x78, 0x73, 0xd4, 0x86, 0xcd, 0x19, 0xf5,
-	0x30, 0x23, 0xde, 0x20, 0x69, 0x42, 0xb9, 0xd5, 0x44, 0x55, 0x42, 0xe2, 0x10, 0xbd, 0x80, 0x4a,
-	0xc2, 0x11, 0x3d, 0xe5, 0x7f, 0xd9, 0x93, 0x21, 0xf1, 0x5d, 0xde, 0x5a, 0x07, 0xb4, 0xfb, 0xf6,
-	0x05, 0x50, 0x4a, 0x9b, 0xea, 0x80, 0xc6, 0x9f, 0xc4, 0xbf, 0x47, 0x3a, 0x17, 0x34, 0x1b, 0x9f,
-	0x9f, 0x87, 0x0c, 0x6d, 0x43, 0xf1, 0x15, 0x0d, 0xdd, 0xb3, 0x78, 0x08, 0x4e, 0x91, 0xf0, 0x00,
-	0xed, 0x80, 0x76, 0x3c, 0x9b, 0x0c, 0xc9, 0x34, 0x7e, 0x60, 0x47, 0x0b, 0x44, 0x84, 0xf6, 0x21,
-	0xb3, 0xa0, 0x58, 0xac, 0x5b, 0xbe, 0x4c, 0xd7, 0xa0, 0xdb, 0xf8, 0x51, 0x00, 0xfd, 0x88, 0x44,
-	0x11, 0x1e, 0x11, 0xf4, 0x2f, 0xe4, 0x59, 0x78, 0xb7, 0x93, 0xf3, 0x2c, 0x44, 0x2d, 0xd0, 0x86,
-	0x42, 0x8f, 0x5c, 0xed, 0xad, 0xac, 0x93, 0x58, 0xa7, 0x1c, 0xab, 0x44, 0xa1, 0x0e, 0x54, 0x53,
-	0xd3, 0x4f, 0x08, 0xc3, 0x42, 0x8b, 0xd1, 0xde, 0xb9, 0x3d, 0x00, 0xbe, 0x4c, 0x92, 0x9c, 0xee,
-	0x89, 0x58, 0xb0, 0xc7, 0x00, 0x74, 0x4a, 0x06, 0x58, 0x4c, 0x55, 0xfc, 0x37, 0x30, 0xda, 0x7f,
-	0x66, 0xfc, 0xd4, 0x35, 0x87, 0x39, 0xa7, 0x4c, 0x53, 0x63, 0x3e, 0x87, 0x6a, 0xc6, 0x1a, 0x84,
-	0x63, 0xb3, 0x28, 0x88, 0x7f, 0xdd, 0x41, 0x3c, 0xe9, 0x1f, 0xe6, 0x1c, 0x23, 0xa5, 0x9e, 0x8c,
-	0x51, 0x17, 0xb6, 0xae, 0x91, 0xf9, 0xa0, 0xe6, 0xa6, 0x26, 0xf8, 0xe6, 0x1d, 0x7c, 0x61, 0xd7,
-	0xc3, 0x9c, 0xb3, 0x41, 0xd7, 0x0d, 0xbc, 0x07, 0x9a, 0x14, 0xad, 0xdf, 0x9c, 0x55, 0xaa, 0x58,
-	0x22, 0xd0, 0x43, 0x28, 0x67, 0x52, 0x4b, 0x02, 0x8e, 0x6e, 0xc2, 0x85, 0xce, 0x12, 0x4e, 0x44,
-	0xee, 0x81, 0xe6, 0x0a, 0x77, 0x99, 0xe5, 0x9b, 0xe9, 0x63, 0xd7, 0xf1, 0xf4, 0x31, 0xc2, 0xd6,
-	0x40, 0x65, 0x73, 0x4a, 0xec, 0xad, 0xcb, 0x65, 0x4d, 0xb9, 0x5a, 0xd6, 0x94, 0x6f, 0xcb, 0x9a,
-	0xf2, 0xe9, 0x7b, 0x2d, 0x37, 0xd4, 0xc4, 0xcf, 0xc3, 0xa3, 0x9f, 0x01, 0x00, 0x00, 0xff, 0xff,
-	0x9d, 0x4f, 0x76, 0x83, 0x67, 0x06, 0x00, 0x00,
+	// 946 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xa4, 0x56, 0xcf, 0x8f, 0xdb, 0x44,
+	0x14, 0x8e, 0x1d, 0xaf, 0x93, 0xbc, 0x24, 0xbb, 0xe9, 0x63, 0xbb, 0x84, 0x15, 0x24, 0x2b, 0xf7,
+	0x12, 0x15, 0xe1, 0x8a, 0x50, 0x55, 0x50, 0x44, 0xa5, 0x9a, 0x54, 0x4a, 0xb4, 0x62, 0x17, 0x79,
+	0xb9, 0x47, 0x13, 0x7b, 0x48, 0xad, 0xdd, 0xd8, 0x5e, 0x7b, 0x0c, 0x8d, 0x38, 0x20, 0x01, 0x27,
+	0x4e, 0x3d, 0x72, 0xe4, 0xce, 0x3f, 0xd2, 0x63, 0xff, 0x82, 0x14, 0x85, 0x3f, 0x80, 0x0b, 0xa7,
+	0x3d, 0xa1, 0x99, 0xf1, 0xaf, 0xdd, 0xa4, 0x42, 0xa5, 0xa7, 0xe4, 0x79, 0xbe, 0xef, 0xcd, 0xf7,
+	0x9e, 0xbf, 0x79, 0x63, 0x68, 0xd1, 0x90, 0x3c, 0x0b, 0x62, 0x33, 0x8c, 0x02, 0x16, 0x60, 0x5d,
+	0x46, 0xe1, 0xec, 0xf0, 0xa3, 0xb9, 0xc7, 0x9e, 0x26, 0x33, 0xd3, 0x09, 0x16, 0xf7, 0xe6, 0xc1,
+	0x3c, 0xb8, 0x27, 0x00, 0xb3, 0xe4, 0x5b, 0x11, 0x89, 0x40, 0xfc, 0x93, 0x44, 0x63, 0x02, 0xda,
+	0x59, 0x48, 0x7c, 0x7c, 0x0f, 0xaa, 0xe7, 0x74, 0xd9, 0x55, 0x8e, 0x94, 0x41, 0xcb, 0xaa, 0x5d,
+	0xad, 0xfa, 0xd5, 0x63, 0xba, 0xb4, 0xf9, 0x33, 0x3c, 0x82, 0x1a, 0xf5, 0xdd, 0x29, 0x5f, 0x56,
+	0xaf, 0x2f, 0xeb, 0xd4, 0x77, 0x8f, 0xe9, 0xf2, 0xa1, 0xf6, 0xdb, 0xef, 0xfd, 0x8a, 0xf1, 0x23,
+	0xd4, 0xbe, 0x0c, 0x16, 0x0b, 0xe2, 0xbb, 0x78, 0x00, 0xaa, 0xe7, 0x8a, 0x64, 0x9a, 0xa5, 0xaf,
+	0x57, 0x7d, 0x75, 0x32, 0xb2, 0x55, 0xcf, 0xc5, 0x01, 0x68, 0x71, 0x48, 0x7c, 0x91, 0xa7, 0x39,
+	0xdc, 0x35, 0x33, 0xd5, 0x26, 0xd7, 0x60, 0x69, 0x2f, 0x56, 0xfd, 0x8a, 0x2d, 0x10, 0xd8, 0x85,
+	0xda, 0xf7, 0x91, 0xc7, 0x3c, 0x7f, 0xde, 0xad, 0x1e, 0x29, 0x83, 0xba, 0x9d, 0x85, 0x88, 0xa0,
+	0xb9, 0x84, 0x91, 0xae, 0xc6, 0xb5, 0xd8, 0xe2, 0x7f, 0x2a, 0xe0, 0x07, 0x80, 0x89, 0x1f, 0x33,
+	0xe2, 0x3b, 0x74, 0x32, 0xc2, 0xcf, 0x00, 0x22, 0x1a, 0x5e, 0x78, 0x0e, 0x99, 0xe6, 0x5a, 0x0e,
+	0xd7, 0xab, 0x7e, 0xc3, 0x96, 0x4f, 0x27, 0xa3, 0xab, 0x72, 0x60, 0x37, 0x52, 0xf4, 0xc4, 0xc5,
+	0x21, 0xb4, 0xbc, 0x34, 0xd1, 0xd4, 0x4f, 0x16, 0x42, 0xae, 0x66, 0xed, 0x5d, 0xad, 0xfa, 0xcd,
+	0x6c, 0x83, 0x93, 0x64, 0x61, 0x37, 0xbd, 0x22, 0x30, 0x9e, 0x2b, 0xd0, 0xca, 0x16, 0x47, 0x84,
+	0x11, 0xfc, 0x10, 0x6a, 0x8e, 0x6c, 0x87, 0xd8, 0xbc, 0x39, 0xbc, 0x55, 0x94, 0x9b, 0xf6, 0xc9,
+	0xce, 0x10, 0x78, 0x07, 0x6a, 0x31, 0xbd, 0x2c, 0x6d, 0x06, 0x57, 0xab, 0xbe, 0x7e, 0x46, 0x2f,
+	0xf9, 0x3e, 0x7a, 0x2c, 0x7e, 0xd1, 0x04, 0xcd, 0xa5, 0x61, 0xdc, 0xad, 0x1e, 0x55, 0x07, 0xcd,
+	0xe1, 0x7e, 0x91, 0xae, 0xa8, 0x3a, 0xeb, 0x21, 0xc7, 0x19, 0x8f, 0xa1, 0xf1, 0x75, 0x44, 0x1f,
+	0x3b, 0x0e, 0x0d, 0x19, 0xde, 0x4f, 0xdb, 0x26, 0xb5, 0x1c, 0x6c, 0x92, 0xb9, 0x68, 0xab, 0xce,
+	0xe9, 0x2f, 0x57, 0x7d, 0x45, 0x36, 0xd6, 0x68, 0x43, 0x33, 0x4f, 0x71, 0x7a, 0x6c, 0xfc, 0xac,
+	0xc0, 0x6e, 0x1e, 0xf3, 0xd6, 0x2d, 0x71, 0x08, 0x7b, 0x49, 0xe8, 0x12, 0x46, 0xdd, 0x69, 0x56,
+	0x81, 0xb2, 0x51, 0x41, 0x3b, 0x85, 0xc8, 0x10, 0xbf, 0x80, 0x56, 0xc6, 0x11, 0x05, 0xa9, 0xff,
+	0x59, 0x50, 0x33, 0xc5, 0x8f, 0x78, 0x5d, 0x8f, 0x40, 0x7f, 0xab, 0xa2, 0x00, 0xea, 0x79, 0x45,
+	0x8f, 0x40, 0xe7, 0x2f, 0xc3, 0xfb, 0xbf, 0xb9, 0x2e, 0x41, 0xb7, 0xc8, 0xc5, 0x45, 0xc0, 0x70,
+	0x1f, 0x76, 0x68, 0x18, 0x38, 0x4f, 0x65, 0xf9, 0xb6, 0x0c, 0xf0, 0x00, 0x74, 0x3f, 0x59, 0xcc,
+	0x68, 0x24, 0xdf, 0xab, 0x9d, 0x46, 0x37, 0xdc, 0x59, 0x7d, 0x03, 0x77, 0x1a, 0x7f, 0x57, 0xa1,
+	0xf6, 0x15, 0x8d, 0x63, 0x32, 0xa7, 0xf8, 0x01, 0xa8, 0x2c, 0x48, 0x1b, 0xde, 0xbe, 0xce, 0x50,
+	0x59, 0x80, 0x26, 0xe8, 0x33, 0xa1, 0x2e, 0x3d, 0x71, 0x9d, 0xa2, 0x2a, 0xa9, 0x3a, 0x6d, 0x6f,
+	0x8a, 0xc2, 0x09, 0xe4, 0x9e, 0xce, 0x64, 0xbd, 0xee, 0xbd, 0x20, 0x27, 0xae, 0x57, 0xfd, 0xd2,
+	0x91, 0xb3, 0x21, 0x23, 0x4f, 0x5c, 0xbc, 0x0f, 0x10, 0x46, 0x74, 0x4a, 0x44, 0xa3, 0xc5, 0x61,
+	0x6d, 0x0e, 0xdf, 0x29, 0x32, 0xe5, 0x2e, 0x1a, 0x57, 0xec, 0x46, 0x98, 0xbb, 0xf4, 0x73, 0x68,
+	0x17, 0xac, 0x69, 0x70, 0xde, 0xdd, 0x11, 0xc4, 0xdb, 0x5b, 0x88, 0xa7, 0xc7, 0xe3, 0x8a, 0xdd,
+	0xcc, 0xa9, 0xa7, 0xe7, 0x38, 0x82, 0x4e, 0x89, 0xcc, 0x1b, 0xb6, 0xec, 0xea, 0x82, 0xdf, 0xdd,
+	0xc2, 0x17, 0xf6, 0x1d, 0x57, 0xec, 0xdd, 0xf0, 0xba, 0xa1, 0xef, 0x82, 0x9e, 0x8a, 0xae, 0xdd,
+	0xec, 0x59, 0xae, 0x38, 0x45, 0xe0, 0xc7, 0xd0, 0x28, 0xa4, 0xd6, 0x05, 0x1c, 0x6f, 0xc2, 0x85,
+	0xce, 0x3a, 0xc9, 0x44, 0xde, 0x05, 0xdd, 0x11, 0x86, 0xeb, 0x36, 0x6e, 0xa6, 0x97, 0x46, 0xe4,
+	0xe9, 0x25, 0xc2, 0xd2, 0x41, 0x63, 0xcb, 0x90, 0x1a, 0x7f, 0xa8, 0xd0, 0xce, 0xda, 0x7c, 0xc6,
+	0x08, 0xa3, 0x38, 0x04, 0x6d, 0x41, 0x73, 0xb3, 0x6e, 0x7f, 0x43, 0x25, 0xab, 0x72, 0x2c, 0x3e,
+	0x00, 0x3d, 0x66, 0x84, 0x25, 0xb1, 0x30, 0xc3, 0xee, 0xb0, 0xb7, 0xc9, 0x12, 0xc9, 0xcd, 0x33,
+	0x81, 0xb2, 0x53, 0x74, 0x7e, 0x30, 0xaa, 0x6f, 0x72, 0x30, 0x70, 0x90, 0x5b, 0x4f, 0xdb, 0x6e,
+	0xbd, 0xcc, 0x74, 0xc6, 0x09, 0xe8, 0x72, 0x47, 0xac, 0x83, 0x76, 0x12, 0xf8, 0xb4, 0x53, 0xc1,
+	0xbd, 0xd2, 0xdc, 0xa1, 0x6e, 0x47, 0xc1, 0x56, 0x76, 0x66, 0xa9, 0xdb, 0x51, 0xb1, 0x0d, 0x0d,
+	0xd9, 0x2c, 0x1e, 0x56, 0xf9, 0xe2, 0x93, 0x67, 0xd4, 0x49, 0x78, 0xa4, 0x19, 0xff, 0xa8, 0xd0,
+	0x18, 0x93, 0xc8, 0x95, 0x9d, 0x7a, 0x8b, 0x6b, 0xe0, 0x0e, 0xec, 0xf8, 0x81, 0x4b, 0xe5, 0x7c,
+	0xda, 0x38, 0x5f, 0x72, 0x0d, 0x7f, 0x51, 0xe0, 0x5d, 0x16, 0x25, 0xbe, 0x23, 0xc6, 0x59, 0xf9,
+	0xda, 0xc8, 0x06, 0xb5, 0x59, 0x54, 0x9e, 0xcb, 0x32, 0xbf, 0xc9, 0x28, 0xa5, 0x0b, 0x25, 0x7e,
+	0xe2, 0xb3, 0x68, 0x69, 0xbd, 0xff, 0xd3, 0xab, 0xd2, 0x3e, 0xbf, 0xbe, 0xba, 0x7e, 0xe9, 0xdc,
+	0x66, 0xdb, 0x98, 0xf8, 0x00, 0x6e, 0x15, 0x2a, 0xb2, 0x41, 0xac, 0x6d, 0x0c, 0xe2, 0xbd, 0x1c,
+	0x24, 0x1f, 0x1c, 0x8e, 0xe1, 0xf0, 0xf5, 0x52, 0xb0, 0x53, 0x7c, 0x15, 0x68, 0xf2, 0x63, 0x60,
+	0x1f, 0x76, 0xbe, 0x23, 0x17, 0x09, 0x4d, 0xc7, 0x99, 0x0c, 0x1e, 0xaa, 0x9f, 0x2a, 0x56, 0xe7,
+	0xc5, 0xba, 0xa7, 0xbc, 0x5c, 0xf7, 0x94, 0x3f, 0xd7, 0x3d, 0xe5, 0xf9, 0x5f, 0xbd, 0xca, 0x4c,
+	0x17, 0x9f, 0x18, 0x9f, 0xfc, 0x1b, 0x00, 0x00, 0xff, 0xff, 0x8b, 0x9f, 0xe0, 0x82, 0xab, 0x08,
+	0x00, 0x00,
 }

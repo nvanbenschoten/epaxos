@@ -9,10 +9,7 @@ import (
 func (p *epaxos) sendTo(m proto.Message, to pb.ReplicaID, inst *instance) {
 	mm := pb.WrapMessage(m)
 	mm.To = to
-	mm.InstanceMeta = pb.InstanceMeta{
-		Replica:     inst.r,
-		InstanceNum: inst.i,
-	}
+	mm.InstanceID = inst.is.InstanceID
 	// mm.Ballot = 1 TODO
 	p.msgs = append(p.msgs, mm)
 }
@@ -26,7 +23,7 @@ func (p *epaxos) broadcast(m proto.Message, inst *instance) {
 }
 
 func (inst *instance) reply(m proto.Message) {
-	inst.p.sendTo(m, inst.r, inst)
+	inst.p.sendTo(m, inst.is.ReplicaID, inst)
 }
 
 func (inst *instance) broadcast(m proto.Message) {

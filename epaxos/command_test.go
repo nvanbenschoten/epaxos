@@ -8,10 +8,10 @@ import (
 	pb "github.com/nvanbenschoten/epaxos/epaxos/epaxospb"
 )
 
-// makeTestingCommand creates a writing pb.Command with the provided start and
+// newTestingCommand creates a writing *pb.Command with the provided start and
 // end keys.
-func makeTestingCommand(start, end string) pb.Command {
-	return pb.Command{
+func newTestingCommand(start, end string) *pb.Command {
+	return &pb.Command{
 		ID: rand.Uint64(),
 		Span: pb.Span{
 			Key:    pb.Key(start),
@@ -21,15 +21,10 @@ func makeTestingCommand(start, end string) pb.Command {
 	}
 }
 
-func makeTestingReadCommand(start, end string) pb.Command {
-	cmd := makeTestingCommand(start, end)
+func newTestingReadCommand(start, end string) *pb.Command {
+	cmd := newTestingCommand(start, end)
 	cmd.Writing = false
 	return cmd
-}
-
-func newTestingCommand(start, end string) *pb.Command {
-	cmd := makeTestingCommand(start, end)
-	return &cmd
 }
 
 // newTestingEPaxos creates a new epaxos state machine with the following
@@ -47,40 +42,50 @@ func newTestingEPaxos() *epaxos {
 	p := newEPaxos(&c)
 
 	inst01 := p.newInstance(0, 1)
-	inst01.cmd = makeTestingCommand("a", "z")
-	inst01.seq = 1
-	inst01.deps = map[pb.Dependency]struct{}{}
+	inst01.is.InstanceData = pb.InstanceData{
+		Command: newTestingCommand("a", "z"),
+		SeqNum:  1,
+		Deps:    []pb.InstanceID{},
+	}
 
 	inst11 := p.newInstance(1, 1)
-	inst11.cmd = makeTestingCommand("a", "z")
-	inst11.seq = 2
-	inst11.deps = map[pb.Dependency]struct{}{
-		pb.Dependency{ReplicaID: 0, InstanceNum: 1}: {},
+	inst11.is.InstanceData = pb.InstanceData{
+		Command: newTestingCommand("a", "z"),
+		SeqNum:  2,
+		Deps: []pb.InstanceID{
+			pb.InstanceID{ReplicaID: 0, InstanceNum: 1},
+		},
 	}
 
 	inst21 := p.newInstance(2, 1)
-	inst21.cmd = makeTestingCommand("a", "b")
-	inst21.seq = 3
-	inst21.deps = map[pb.Dependency]struct{}{
-		pb.Dependency{ReplicaID: 0, InstanceNum: 1}: {},
-		pb.Dependency{ReplicaID: 1, InstanceNum: 1}: {},
+	inst21.is.InstanceData = pb.InstanceData{
+		Command: newTestingCommand("a", "b"),
+		SeqNum:  3,
+		Deps: []pb.InstanceID{
+			pb.InstanceID{ReplicaID: 0, InstanceNum: 1},
+			pb.InstanceID{ReplicaID: 1, InstanceNum: 1},
+		},
 	}
 
 	inst02 := p.newInstance(0, 2)
-	inst02.cmd = makeTestingCommand("a", "m")
-	inst02.seq = 4
-	inst02.deps = map[pb.Dependency]struct{}{
-		pb.Dependency{ReplicaID: 0, InstanceNum: 1}: {},
-		pb.Dependency{ReplicaID: 1, InstanceNum: 1}: {},
-		pb.Dependency{ReplicaID: 2, InstanceNum: 1}: {},
+	inst02.is.InstanceData = pb.InstanceData{
+		Command: newTestingCommand("a", "m"),
+		SeqNum:  4,
+		Deps: []pb.InstanceID{
+			pb.InstanceID{ReplicaID: 0, InstanceNum: 1},
+			pb.InstanceID{ReplicaID: 1, InstanceNum: 1},
+			pb.InstanceID{ReplicaID: 2, InstanceNum: 1},
+		},
 	}
 
 	inst12 := p.newInstance(1, 2)
-	inst12.cmd = makeTestingCommand("n", "z")
-	inst12.seq = 5
-	inst12.deps = map[pb.Dependency]struct{}{
-		pb.Dependency{ReplicaID: 0, InstanceNum: 1}: {},
-		pb.Dependency{ReplicaID: 1, InstanceNum: 1}: {},
+	inst12.is.InstanceData = pb.InstanceData{
+		Command: newTestingCommand("n", "z"),
+		SeqNum:  5,
+		Deps: []pb.InstanceID{
+			pb.InstanceID{ReplicaID: 0, InstanceNum: 1},
+			pb.InstanceID{ReplicaID: 1, InstanceNum: 1},
+		},
 	}
 
 	p.commands[0].ReplaceOrInsert(inst01)
@@ -120,7 +125,7 @@ func TestOnRequestIncrementInstanceNumber(t *testing.T) {
 	assertMaxInstanceNums()
 
 	// Crete a new command for replica 0 and verify the new max instance number.
-	newCmd := makeTestingCommand("a", "z")
+	newCmd := newTestingCommand("a", "z")
 	p.onRequest(newCmd)
 	expMaxInstanceNums[0] = 3
 	assertMaxInstanceNums()
@@ -157,7 +162,7 @@ func TestOnRequestIncrementSequenceNumber(t *testing.T) {
 	assertMaxSeqNums()
 
 	// Crete a new command for replica 0 and verify the new max seq number.
-	newCmd := makeTestingCommand("a", "z")
+	newCmd := newTestingCommand("a", "z")
 	p.onRequest(newCmd)
 	expMaxSeqNums[0] = 6
 	assertMaxSeqNums()
@@ -179,19 +184,19 @@ func TestOnRequestDependencies(t *testing.T) {
 	p := newTestingEPaxos()
 
 	// Verify current max dependencies numbers.
-	expMaxDeps := map[pb.ReplicaID]map[pb.Dependency]struct{}{
+	expMaxDeps := map[pb.ReplicaID][]pb.InstanceID{
 		0: {
-			pb.Dependency{ReplicaID: 0, InstanceNum: 1}: {},
-			pb.Dependency{ReplicaID: 1, InstanceNum: 1}: {},
-			pb.Dependency{ReplicaID: 2, InstanceNum: 1}: {},
+			pb.InstanceID{ReplicaID: 0, InstanceNum: 1},
+			pb.InstanceID{ReplicaID: 1, InstanceNum: 1},
+			pb.InstanceID{ReplicaID: 2, InstanceNum: 1},
 		},
 		1: {
-			pb.Dependency{ReplicaID: 0, InstanceNum: 1}: {},
-			pb.Dependency{ReplicaID: 1, InstanceNum: 1}: {},
+			pb.InstanceID{ReplicaID: 0, InstanceNum: 1},
+			pb.InstanceID{ReplicaID: 1, InstanceNum: 1},
 		},
 		2: {
-			pb.Dependency{ReplicaID: 0, InstanceNum: 1}: {},
-			pb.Dependency{ReplicaID: 1, InstanceNum: 1}: {},
+			pb.InstanceID{ReplicaID: 0, InstanceNum: 1},
+			pb.InstanceID{ReplicaID: 1, InstanceNum: 1},
 		},
 	}
 	assertMaxDeps := func() {
@@ -204,14 +209,14 @@ func TestOnRequestDependencies(t *testing.T) {
 	assertMaxDeps()
 
 	// Crete a new command for replica 0 and verify the new max deps.
-	newCmd := makeTestingCommand("a", "z")
+	newCmd := newTestingCommand("a", "z")
 	p.onRequest(newCmd)
-	expMaxDeps[0] = map[pb.Dependency]struct{}{
-		pb.Dependency{ReplicaID: 0, InstanceNum: 1}: {},
-		pb.Dependency{ReplicaID: 0, InstanceNum: 2}: {},
-		pb.Dependency{ReplicaID: 1, InstanceNum: 1}: {},
-		pb.Dependency{ReplicaID: 1, InstanceNum: 2}: {},
-		pb.Dependency{ReplicaID: 2, InstanceNum: 1}: {},
+	expMaxDeps[0] = []pb.InstanceID{
+		pb.InstanceID{ReplicaID: 0, InstanceNum: 1},
+		pb.InstanceID{ReplicaID: 0, InstanceNum: 2},
+		pb.InstanceID{ReplicaID: 1, InstanceNum: 1},
+		pb.InstanceID{ReplicaID: 1, InstanceNum: 2},
+		pb.InstanceID{ReplicaID: 2, InstanceNum: 1},
 	}
 	assertMaxDeps()
 
@@ -219,10 +224,10 @@ func TestOnRequestDependencies(t *testing.T) {
 	newCmd.Span.Key = pb.Key("c")
 	p.changeID(t, 1)
 	p.onRequest(newCmd)
-	expMaxDeps[1] = map[pb.Dependency]struct{}{
-		pb.Dependency{ReplicaID: 0, InstanceNum: 3}: {},
-		pb.Dependency{ReplicaID: 1, InstanceNum: 1}: {},
-		pb.Dependency{ReplicaID: 1, InstanceNum: 2}: {},
+	expMaxDeps[1] = []pb.InstanceID{
+		pb.InstanceID{ReplicaID: 0, InstanceNum: 3},
+		pb.InstanceID{ReplicaID: 1, InstanceNum: 1},
+		pb.InstanceID{ReplicaID: 1, InstanceNum: 2},
 	}
 	assertMaxDeps()
 
@@ -230,9 +235,9 @@ func TestOnRequestDependencies(t *testing.T) {
 	newCmd.Span.EndKey = pb.Key("d")
 	p.changeID(t, 2)
 	p.onRequest(newCmd)
-	expMaxDeps[2] = map[pb.Dependency]struct{}{
-		pb.Dependency{ReplicaID: 0, InstanceNum: 3}: {},
-		pb.Dependency{ReplicaID: 1, InstanceNum: 3}: {},
+	expMaxDeps[2] = []pb.InstanceID{
+		pb.InstanceID{ReplicaID: 0, InstanceNum: 3},
+		pb.InstanceID{ReplicaID: 1, InstanceNum: 3},
 	}
 	assertMaxDeps()
 }

@@ -7,10 +7,6 @@ import (
 	pb "github.com/nvanbenschoten/epaxos/epaxos/epaxospb"
 )
 
-func (p *epaxos) localCommands() *btree.BTree {
-	return p.commands[p.id]
-}
-
 func (p *epaxos) maxInstance(r pb.ReplicaID) *instance {
 	if maxInstItem := p.commands[r].Max(); maxInstItem != nil {
 		return maxInstItem.(*instance)
@@ -20,21 +16,21 @@ func (p *epaxos) maxInstance(r pb.ReplicaID) *instance {
 
 func (p *epaxos) maxInstanceNum(r pb.ReplicaID) pb.InstanceNum {
 	if maxInst := p.maxInstance(r); maxInst != nil {
-		return maxInst.i
+		return maxInst.is.InstanceNum
 	}
 	return p.maxTruncatedInstanceNum[r]
 }
 
 func (p *epaxos) maxSeqNum(r pb.ReplicaID) pb.SeqNum {
 	if maxInst := p.maxInstance(r); maxInst != nil {
-		return maxInst.seq
+		return maxInst.is.SeqNum
 	}
 	return p.maxTruncatedSeqNum
 }
 
-func (p *epaxos) maxDeps(r pb.ReplicaID) map[pb.Dependency]struct{} {
+func (p *epaxos) maxDeps(r pb.ReplicaID) []pb.InstanceID {
 	if maxInst := p.maxInstance(r); maxInst != nil {
-		return maxInst.deps
+		return maxInst.is.Deps
 	}
 	return nil
 }
@@ -55,32 +51,24 @@ func (p *epaxos) hasExecuted(r pb.ReplicaID, i pb.InstanceNum) bool {
 		return true
 	}
 	if inst := p.getInstance(r, i); inst != nil {
-		return inst.state == executed
-	}
-	return false
-}
-
-func (p *epaxos) hasCommitted(r pb.ReplicaID, i pb.InstanceNum) bool {
-	if p.hasExecuted(r, i) {
-		return true
-	}
-	if inst := p.getInstance(r, i); inst != nil {
-		return inst.state == committed
+		return inst.is.Status == pb.InstanceState_Executed
 	}
 	return false
 }
 
 // HasExecuted implements the history interface.
 func (p *epaxos) HasExecuted(e executableID) bool {
-	d := e.(pb.Dependency)
+	d := e.(pb.InstanceID)
 	return p.hasExecuted(d.ReplicaID, d.InstanceNum)
 }
 
 // seqAndDepsForCommand determines the locally known maximum interfering sequence
 // number and dependencies for a given command.
-func (p *epaxos) seqAndDepsForCommand(cmd pb.Command) (pb.SeqNum, map[pb.Dependency]struct{}) {
+func (p *epaxos) seqAndDepsForCommand(
+	cmd *pb.Command, ignoredInstance pb.InstanceID,
+) (pb.SeqNum, map[pb.InstanceID]struct{}) {
 	maxSeq := p.maxTruncatedSeqNum
-	deps := make(map[pb.Dependency]struct{})
+	deps := make(map[pb.InstanceID]struct{})
 
 	cmdRage := rangeForCmd(cmd)
 	for rID, cmds := range p.commands {
@@ -92,13 +80,20 @@ func (p *epaxos) seqAndDepsForCommand(cmd pb.Command) (pb.SeqNum, map[pb.Depende
 		// The logic here is very similar to that in CockroachDB's Command Queue.
 		cmds.Descend(func(i btree.Item) bool {
 			inst := i.(*instance)
+			if inst.is.InstanceID == ignoredInstance {
+				return true
+			}
+
 			addDep := func() {
-				dep := pb.Dependency{ReplicaID: rID, InstanceNum: inst.i}
+				dep := pb.InstanceID{
+					ReplicaID:   rID,
+					InstanceNum: inst.is.InstanceNum,
+				}
 				deps[dep] = struct{}{}
 			}
 
-			if otherCmd := inst.cmd; otherCmd.Interferes(cmd) {
-				maxSeq = pb.MaxSeqNum(maxSeq, inst.seq)
+			if otherCmd := inst.is.Command; otherCmd.Interferes(*cmd) {
+				maxSeq = pb.MaxSeqNum(maxSeq, inst.is.SeqNum)
 
 				otherCmdRange := rangeForCmd(otherCmd)
 				if otherCmd.Writing {
@@ -131,7 +126,7 @@ func (p *epaxos) seqAndDepsForCommand(cmd pb.Command) (pb.SeqNum, map[pb.Depende
 	return maxSeq, deps
 }
 
-func rangeForCmd(cmd pb.Command) interval.Range {
+func rangeForCmd(cmd *pb.Command) interval.Range {
 	startKey := cmd.Span.Key
 	endKey := cmd.Span.EndKey
 	if len(endKey) == 0 {
@@ -143,17 +138,17 @@ func rangeForCmd(cmd pb.Command) interval.Range {
 	}
 }
 
-func (p *epaxos) onRequest(cmd pb.Command) *instance {
+func (p *epaxos) onRequest(cmd *pb.Command) *instance {
 	// Determine the smallest unused instance number.
 	i := p.maxInstanceNum(p.id) + 1
 
 	// Add a new instance for the command in the local commands.
-	maxLocalSeq, localDeps := p.seqAndDepsForCommand(cmd)
+	maxLocalSeq, localDeps := p.seqAndDepsForCommand(cmd, pb.InstanceID{})
 	newInst := p.newInstance(p.id, i)
-	newInst.cmd = cmd
-	newInst.seq = maxLocalSeq + 1
-	newInst.deps = localDeps
-	p.localCommands().ReplaceOrInsert(newInst)
+	newInst.is.Command = cmd
+	newInst.is.SeqNum = maxLocalSeq + 1
+	newInst.is.Deps = depSliceFromMap(localDeps)
+	p.commands[p.id].ReplaceOrInsert(newInst)
 
 	// Transition the new instance into a preAccepted state.
 	newInst.transitionToPreAccept()
@@ -161,7 +156,7 @@ func (p *epaxos) onRequest(cmd pb.Command) *instance {
 }
 
 func (p *epaxos) prepareToExecute(inst *instance) {
-	inst.assertState(committed)
+	inst.assertState(pb.InstanceState_Committed)
 	p.executor.addExec(inst)
 	// TODO pull executor into a different goroutine and run asynchronously.
 	p.executor.run()
@@ -169,16 +164,16 @@ func (p *epaxos) prepareToExecute(inst *instance) {
 }
 
 func (p *epaxos) execute(inst *instance) {
-	inst.assertState(committed)
-	inst.state = executed
-	p.deliverExecutedCommand(inst.cmd)
+	inst.assertState(pb.InstanceState_Committed)
+	inst.is.Status = pb.InstanceState_Executed
+	p.deliverExecutedCommand(*inst.is.Command)
 }
 
 func (p *epaxos) truncateCommands() {
 	for r, cmds := range p.commands {
 		var executedItems []btree.Item
 		cmds.Ascend(func(i btree.Item) bool {
-			if i.(*instance).state == executed {
+			if i.(*instance).is.Status == pb.InstanceState_Executed {
 				executedItems = append(executedItems, i)
 				return true
 			}
@@ -188,8 +183,8 @@ func (p *epaxos) truncateCommands() {
 			curMaxInstNum := p.maxTruncatedInstanceNum[r]
 			for _, executedItem := range executedItems {
 				inst := executedItem.(*instance)
-				p.maxTruncatedSeqNum = pb.MaxSeqNum(p.maxTruncatedSeqNum, inst.seq)
-				curMaxInstNum = pb.MaxInstanceNum(curMaxInstNum, inst.i)
+				p.maxTruncatedSeqNum = pb.MaxSeqNum(p.maxTruncatedSeqNum, inst.is.SeqNum)
+				curMaxInstNum = pb.MaxInstanceNum(curMaxInstNum, inst.is.InstanceNum)
 				cmds.Delete(executedItem)
 			}
 			p.maxTruncatedInstanceNum[r] = curMaxInstNum

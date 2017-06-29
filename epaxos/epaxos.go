@@ -44,7 +44,7 @@ func (c *Config) validate() error {
 type epaxos struct {
 	// id is a unique identifier for this node.
 	id pb.ReplicaID
-	// nodes is the set of all nodes in the Paxos network.
+	// nodes is the set of all nodes in the EPaxos network.
 	nodes []pb.ReplicaID
 
 	// commands is a map from replica to an ordered tree of instance, indexed by
@@ -98,6 +98,7 @@ func newEPaxos(c *Config) *epaxos {
 		timers:                  make(map[*tickingTimer]struct{}),
 		rand:                    rand.New(rand.NewSource(c.RandSeed)),
 	}
+	// p.sc = makeStorageCache(p, NewMemoryStorage(c))
 	p.executor = makeExecutor(p)
 	for _, rep := range c.Nodes {
 		p.commands[rep] = btree.New(32 /* degree */)
@@ -105,6 +106,14 @@ func newEPaxos(c *Config) *epaxos {
 	p.initTimers()
 	return p
 }
+
+// func (p *epaxos) initStorage(s Storage) {
+// 	// Wrap the Storage in a cache if it is not already in memory.
+// 	if _, mem := s.(*MemoryStorage); !mem {
+// 		s = wrapWithStorageCache(s)
+// 	}
+// 	p.storage = s
+// }
 
 // initTimers initializes all static timers for the epaxos state machine.
 // TODO allow injecting timeouts.
@@ -144,7 +153,7 @@ func (p *epaxos) unregisterTimer(t *tickingTimer) {
 	delete(p.timers, t)
 }
 
-func (p *epaxos) Request(cmd pb.Command) {
+func (p *epaxos) Request(cmd *pb.Command) {
 	p.onRequest(cmd)
 }
 
@@ -154,8 +163,8 @@ func (p *epaxos) Step(m pb.Message) {
 		return
 	}
 
-	r := m.InstanceMeta.Replica
-	i := m.InstanceMeta.InstanceNum
+	r := m.InstanceID.ReplicaID
+	i := m.InstanceID.InstanceNum
 	inst := p.getInstance(r, i)
 	if inst == nil {
 		if p.hasTruncated(r, i) {
@@ -200,15 +209,15 @@ func (p *epaxos) validateMessage(m pb.Message) bool {
 
 	if pb.IsReply(m.Type) {
 		// The instance's replica should be us.
-		if m.InstanceMeta.Replica != p.id {
+		if m.InstanceID.ReplicaID != p.id {
 			return false
 		}
 	} else {
 		// The instance's replica should be a node that we're aware of, but not us.
-		if m.InstanceMeta.Replica == p.id {
+		if m.InstanceID.ReplicaID == p.id {
 			return false
 		}
-		if !p.knownReplica(m.InstanceMeta.Replica) {
+		if !p.knownReplica(m.InstanceID.ReplicaID) {
 			return false
 		}
 	}

@@ -65,13 +65,13 @@ func (c Command) String() string {
 	return fmt.Sprintf("{%d %s %s%s}", c.ID, prefix, c.Span, data)
 }
 
-// Dependencies is a slice of Dependencies.
-type Dependencies []Dependency
+// InstanceIDs is a slice of InstanceIDs.
+type InstanceIDs []InstanceID
 
-// Dependencies implements the sort.Interface interface.
-func (d Dependencies) Len() int      { return len(d) }
-func (d Dependencies) Swap(i, j int) { d[i], d[j] = d[j], d[i] }
-func (d Dependencies) Less(i, j int) bool {
+// InstanceIDs implements the sort.Interface interface.
+func (d InstanceIDs) Len() int      { return len(d) }
+func (d InstanceIDs) Swap(i, j int) { d[i], d[j] = d[j], d[i] }
+func (d InstanceIDs) Less(i, j int) bool {
 	a, b := d[i], d[j]
 	if a.ReplicaID != b.ReplicaID {
 		return a.ReplicaID < b.ReplicaID
