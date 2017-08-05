@@ -1,6 +1,7 @@
 package epaxos
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/google/btree"
@@ -19,8 +20,6 @@ type instance struct {
 	acceptReplies    int
 }
 
-// TODO restructure state machine
-
 const slowPathTimout = 2
 
 func (p *epaxos) newInstance(r pb.ReplicaID, i pb.InstanceNum) *instance {
@@ -34,7 +33,7 @@ func (p *epaxos) newInstance(r pb.ReplicaID, i pb.InstanceNum) *instance {
 		},
 	}
 	inst.slowPathTimer = makeTickingTimer(slowPathTimout, func() {
-		inst.transitionToAccept()
+		inst.transitionTo(pb.InstanceState_Accepted)
 	})
 	return inst
 }
@@ -42,7 +41,7 @@ func (p *epaxos) newInstance(r pb.ReplicaID, i pb.InstanceNum) *instance {
 func (p *epaxos) newInstanceFromState(is *pb.InstanceState) *instance {
 	inst := &instance{p: p, is: *is}
 	inst.slowPathTimer = makeTickingTimer(slowPathTimout, func() {
-		inst.transitionToAccept()
+		inst.transitionTo(pb.InstanceState_Accepted)
 	})
 	return inst
 }
@@ -59,6 +58,14 @@ func (inst *instance) Less(than btree.Item) bool {
 // instanceKey creates a key to index into the commands btree.
 func instanceKey(i pb.InstanceNum) btree.Item {
 	return &instance{is: pb.InstanceState{InstanceID: pb.InstanceID{InstanceNum: i}}}
+}
+
+//
+// Persistence Funcions
+//
+
+func (inst *instance) persist() {
+	inst.p.storage.PersistInstance(&inst.is)
 }
 
 //
@@ -94,30 +101,58 @@ func (inst *instance) ExecutesBefore(b executable) bool {
 }
 
 func (inst *instance) Execute() {
-	inst.p.execute(inst)
+	inst.transitionTo(pb.InstanceState_Executed)
 }
 
 //
 // State-Transitions
 //
 
-func (inst *instance) transitionToPreAccept() {
-	inst.assertState(pb.InstanceState_None)
-	inst.is.Status = pb.InstanceState_PreAccepted
-	inst.broadcastPreAccept()
+type stateTransition struct {
+	from, to pb.InstanceState_Status
 }
 
-func (inst *instance) transitionToAccept() {
-	inst.assertState(pb.InstanceState_PreAccepted)
-	inst.is.Status = pb.InstanceState_Accepted
-	inst.broadcastAccept()
+func (st stateTransition) String() string {
+	return fmt.Sprintf("{%v -> %v}", st.from, st.to)
 }
 
-func (inst *instance) transitionToCommit() {
-	inst.assertState(pb.InstanceState_PreAccepted, pb.InstanceState_Accepted)
-	inst.is.Status = pb.InstanceState_Committed
-	inst.broadcastCommit()
-	inst.prepareToExecute()
+var stateTransitions = map[stateTransition]func(*instance){
+	stateTransition{pb.InstanceState_None, pb.InstanceState_PreAccepted}: func(inst *instance) {
+		inst.broadcastPreAccept()
+	},
+	stateTransition{pb.InstanceState_PreAccepted, pb.InstanceState_Accepted}: func(inst *instance) {
+		inst.broadcastAccept()
+	},
+	stateTransition{pb.InstanceState_PreAccepted, pb.InstanceState_Committed}: func(inst *instance) {
+		inst.broadcastCommit()
+		inst.prepareToExecute()
+	},
+	stateTransition{pb.InstanceState_Accepted, pb.InstanceState_Committed}: func(inst *instance) {
+		inst.broadcastCommit()
+		inst.prepareToExecute()
+	},
+	stateTransition{pb.InstanceState_Committed, pb.InstanceState_Executed}: func(inst *instance) {
+		inst.p.deliverExecutedCommand(*inst.is.Command)
+	},
+}
+
+func (inst *instance) transitionTo(to pb.InstanceState_Status) {
+	st := stateTransition{from: inst.is.Status, to: to}
+	action, ok := stateTransitions[st]
+	if !ok {
+		inst.p.logger.Panicf("unexpected state transition %s", st)
+	}
+
+	inst.is.Status = to
+	action(inst)
+	inst.persist()
+}
+
+func (inst *instance) restartTransition() {
+	cur := inst.is.Status
+	st := stateTransition{from: cur - 1, to: cur}
+	action := stateTransitions[st]
+	action(inst)
 }
 
 func (inst *instance) isStates(states ...pb.InstanceState_Status) bool {
@@ -157,7 +192,7 @@ func (inst *instance) broadcastCommit() {
 
 func (inst *instance) onPreAccept(pa *pb.PreAccept) {
 	// Only handle if this is a new instance, and set the state to preAccepted.
-	if !inst.isStates(pb.InstanceState_None) {
+	if !inst.isStates(pb.InstanceState_None, pb.InstanceState_PreAccepted) {
 		inst.p.logger.Debugf("ignoring PreAccept message while in state %v: %v", inst.is.Status, pa)
 		return
 	}
@@ -243,14 +278,14 @@ func (inst *instance) onEitherPreAcceptReply() {
 	switch {
 	case takeFastPath:
 		inst.p.unregisterTimer(&inst.slowPathTimer)
-		inst.transitionToCommit()
+		inst.transitionTo(pb.InstanceState_Committed)
 	case takeSlowPath:
 		// We have enough replies to take the slow path, however we don't want to
 		// take it immediately in-case it's possible to take the fast path instead.
 		if !inst.fastPathAvailable() {
 			// Since the fast path will never be available, take the slow path.
 			inst.p.unregisterTimer(&inst.slowPathTimer)
-			inst.transitionToAccept()
+			inst.transitionTo(pb.InstanceState_Accepted)
 		} else if !inst.slowPathTimer.isSet() {
 			// Delay for a few ticks before taking slow path to allow for the fast
 			// path quorum to be achieved.
@@ -262,7 +297,7 @@ func (inst *instance) onEitherPreAcceptReply() {
 }
 
 func (inst *instance) onAccept(a *pb.Accept) {
-	if !inst.isStates(pb.InstanceState_None, pb.InstanceState_PreAccepted) {
+	if !inst.isStates(pb.InstanceState_None, pb.InstanceState_PreAccepted, pb.InstanceState_Accepted) {
 		inst.p.logger.Debugf("ignoring Accept message while in state %v: %v", inst.is.Status, a)
 		return
 	}
@@ -280,7 +315,7 @@ func (inst *instance) onAcceptOK(aOK *pb.AcceptOK) {
 
 	inst.acceptReplies++
 	if inst.p.quorum(inst.acceptReplies + 1 /* +1 for leader */) {
-		inst.transitionToCommit()
+		inst.transitionTo(pb.InstanceState_Committed)
 	}
 }
 

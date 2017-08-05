@@ -85,6 +85,16 @@ func (n *network) setInterceptor(f func(from pb.ReplicaID, msg pb.Message)) {
 	n.interceptor = f
 }
 
+func (n *network) restart(id pb.ReplicaID) {
+	p := n.peers[id]
+	n.peers[id] = newEPaxos(&Config{
+		ID:       p.id,
+		Nodes:    p.nodes,
+		Storage:  p.storage,
+		RandSeed: int64(id),
+	})
+}
+
 func (n *network) crash(id pb.ReplicaID) *epaxos {
 	p := n.peers[id]
 	n.failures[p] = struct{}{}
@@ -170,6 +180,12 @@ func (n *network) deliverAllMessages() {
 	}
 }
 
+func (n *network) clearAllMessages() {
+	for _, p := range n.peers {
+		p.ReadMessages()
+	}
+}
+
 func (n *network) count(pred func(*epaxos) bool) int {
 	count := 0
 	for _, p := range n.peers {
@@ -188,27 +204,45 @@ func (n *network) allHave(pred func(*epaxos) bool) bool {
 	return len(n.peers) == n.count(pred)
 }
 
-// waitExecuteInstance waits until the given instance has executed.
-// If quorum is true, it will wait until the instance is executed on
-// a quorum of nodes. If it is true, it will wait until the instance
-// is executed on all nodes.
-func (n *network) waitExecuteInstance(inst *instance, quorum bool) bool {
+// runNetwork waits until the given goal for an epaxos node has been
+// completed. If quorum is true, it will wait until the goal is completed
+// on a quorum of nodes. If it is true, it will wait until the goal is
+// completed on all nodes.
+func (n *network) runNetwork(goal func(p *epaxos) bool, quorum bool) bool {
 	waitUntil := n.allHave
 	if quorum {
 		waitUntil = n.quorumHas
 	}
 
-	const maxTicksPerInstanceExecution = 10
-	for i := 0; i < maxTicksPerInstanceExecution; i++ {
+	const maxTicks = 10
+	for i := 0; i < maxTicks; i++ {
 		n.tickAll()
 		n.deliverAllMessages()
-		if waitUntil(func(p *epaxos) bool {
-			return p.hasExecuted(inst.is.ReplicaID, inst.is.InstanceNum)
-		}) {
+		if waitUntil(goal) {
 			return true
 		}
 	}
 	return false
+}
+
+// waitAcceptInstance waits until the given instance has Accepted.
+// If quorum is true, it will wait until the instance is Accepted on
+// a quorum of nodes. If it is true, it will wait until the instance
+// is Accepted on all nodes.
+func (n *network) waitAcceptInstance(inst *instance, quorum bool) bool {
+	return n.runNetwork(func(p *epaxos) bool {
+		return p.hasAccepted(inst.is.ReplicaID, inst.is.InstanceNum)
+	}, quorum)
+}
+
+// waitExecuteInstance waits until the given instance has executed.
+// If quorum is true, it will wait until the instance is executed on
+// a quorum of nodes. If it is true, it will wait until the instance
+// is executed on all nodes.
+func (n *network) waitExecuteInstance(inst *instance, quorum bool) bool {
+	return n.runNetwork(func(p *epaxos) bool {
+		return p.hasExecuted(inst.is.ReplicaID, inst.is.InstanceNum)
+	}, quorum)
 }
 
 // TestExecuteCommandsNoFailures verifies that each replica can propose a
@@ -343,7 +377,7 @@ func TestExecuteSerializableCommands(t *testing.T) {
 		}
 		otherInstSpace := makeInstSpaceComaparable(peer.commands)
 		if !reflect.DeepEqual(instSpace, otherInstSpace) {
-			t.Fatalf("peer %d: instance spaces differ: \n%+v\n%+v\n%+v", i, instSpace, otherInstSpace)
+			t.Fatalf("peer %d: instance spaces differ: \n%+v\n%+v", i, instSpace, otherInstSpace)
 		}
 		otherExecOrder := peer.ExecutableCommands()
 		if !reflect.DeepEqual(execOrder, otherExecOrder) {
@@ -373,4 +407,29 @@ func treeToSlice(tree *btree.BTree) []pb.InstanceState {
 		return true
 	})
 	return s
+}
+
+func TestExecuteCommandsCrashAfterAccept(t *testing.T) {
+	n := newNetwork(5)
+
+	// Crash two nodes so that the command can not fast-path.
+	n.crash(3)
+	n.crash(4)
+
+	cmd := newTestingCommand("a", "z")
+	inst := n.peers[0].onRequest(cmd)
+
+	if !n.waitAcceptInstance(inst, true /* quorum */) {
+		t.Fatalf("command acceptance failed, instance %+v never installed", inst)
+	}
+	inst.assertState(pb.InstanceState_Accepted)
+	n.clearAllMessages()
+
+	// Restart the node and grab a handle on the new version of the instance.
+	n.restart(0)
+	instAfterRestart := n.peers[0].commands[0].Get(instanceKey(1)).(*instance)
+
+	if !n.waitExecuteInstance(instAfterRestart, true /* quorum */) {
+		t.Fatalf("command execution failed, instance %+v never installed", instAfterRestart)
+	}
 }

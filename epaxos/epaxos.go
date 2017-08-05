@@ -2,6 +2,7 @@ package epaxos
 
 import (
 	"math/rand"
+	"reflect"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/util/interval"
@@ -17,6 +18,10 @@ type Config struct {
 	ID pb.ReplicaID
 	// Nodes is the set of all nodes in the epaxos network.
 	Nodes []pb.ReplicaID
+	// Storage is the persistent storage for epaxos. epaxos reads out
+	// the previous instance state and configuration from storage when
+	// restarting.
+	Storage Storage
 	// Logger is the logger that the epaxos state machine will use
 	// to log events. If not set, a default logger will be used.
 	Logger Logger
@@ -28,6 +33,16 @@ type Config struct {
 func (c *Config) validate() error {
 	if !inReplicaSlice(c.ID, c.Nodes) {
 		return errors.Errorf("ID not in Nodes slice")
+	}
+	if c.Storage == nil {
+		c.Storage = NewMemoryStorage(c)
+	} else if hs, ok := c.Storage.HardState(); ok {
+		if hs.ReplicaID != c.ID {
+			return errors.Errorf("ID different than in HardState")
+		}
+		if !reflect.DeepEqual(hs.Nodes, c.Nodes) {
+			return errors.Errorf("Node set different than in HardState")
+		}
 	}
 	if c.Logger == nil {
 		c.Logger = NewDefaultLogger()
@@ -46,6 +61,8 @@ type epaxos struct {
 	id pb.ReplicaID
 	// nodes is the set of all nodes in the EPaxos network.
 	nodes []pb.ReplicaID
+	// storage is a handle to the node's persistent storage.
+	storage Storage
 
 	// commands is a map from replica to an ordered tree of instance, indexed by
 	// sequence number. BTree contains *instance elements.
@@ -55,7 +72,7 @@ type epaxos struct {
 	// number that has been truncated up to in its command space.
 	// maxTruncatedInstanceNum map[pb.ReplicaID]pb.InstanceNum
 	// maxTruncatedSeqNum is the maximum sequence number that has been truncated.
-	maxTruncatedSeqNum pb.SeqNum
+	// maxTruncatedSeqNum pb.SeqNum
 	// rangeGroup is used to minimize dependency lists by tracking transitive
 	// dependencies.
 	rangeGroup interval.RangeGroup
@@ -98,22 +115,38 @@ func newEPaxos(c *Config) *epaxos {
 		timers:     make(map[*tickingTimer]struct{}),
 		rand:       rand.New(rand.NewSource(c.RandSeed)),
 	}
-	// p.sc = makeStorageCache(p, NewMemoryStorage(c))
 	p.executor = makeExecutor(p)
 	for _, rep := range c.Nodes {
 		p.commands[rep] = btree.New(32 /* degree */)
 	}
+	p.initStorage(c)
 	p.initTimers()
 	return p
 }
 
-// func (p *epaxos) initStorage(s Storage) {
-// 	// Wrap the Storage in a cache if it is not already in memory.
-// 	if _, mem := s.(*MemoryStorage); !mem {
-// 		s = wrapWithStorageCache(s)
-// 	}
-// 	p.storage = s
-// }
+func (p *epaxos) initStorage(c *Config) {
+	s := c.Storage
+	p.storage = s
+
+	// Set up the node's HardState.
+	if _, ok := s.HardState(); !ok {
+		s.PersistHardState(pb.HardState{
+			ReplicaID: c.ID,
+			Nodes:     c.Nodes,
+		})
+	}
+
+	// Load all persisted instances.
+	insts := s.Instances()
+	for _, is := range insts {
+		inst := p.newInstanceFromState(is)
+		p.commands[is.ReplicaID].ReplaceOrInsert(inst)
+		cmdLeader := is.ReplicaID == p.id
+		if cmdLeader && !inst.isStates(pb.InstanceState_Executed) {
+			inst.restartTransition()
+		}
+	}
+}
 
 // initTimers initializes all static timers for the epaxos state machine.
 // TODO allow injecting timeouts.

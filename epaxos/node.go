@@ -54,12 +54,6 @@ type Node interface {
 
 // StartNode returns a new Node with the given configuration.
 func StartNode(c *Config) Node {
-	return RestartNode(c)
-}
-
-// RestartNode returns a new Node with the given configuration and the
-// PersistentState applied.
-func RestartNode(c *Config) Node {
 	p := newEPaxos(c)
 	n := makeNode()
 	n.logger = c.Logger

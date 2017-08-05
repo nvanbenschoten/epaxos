@@ -56,13 +56,13 @@ replication protocol. Features include:
 
 - Command replication
 - Command compaction
+- Persistence
+- Failure Recovery
 
 Features not yet implemented:
 
 - Explicit Prepare Phase
 - Optimized Egalitarian Paxos (smaller fast path quorum)
-- Recovery
-- Persistence
 - Membership changes
 - Batched commands
 - Thrifty operation (see paper)

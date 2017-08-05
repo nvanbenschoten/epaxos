@@ -25,7 +25,7 @@ func (p *epaxos) maxSeqNum(r pb.ReplicaID) pb.SeqNum {
 	if maxInst := p.maxInstance(r); maxInst != nil {
 		return maxInst.is.SeqNum
 	}
-	return p.maxTruncatedSeqNum
+	return 0
 }
 
 func (p *epaxos) maxDeps(r pb.ReplicaID) []pb.InstanceID {
@@ -40,6 +40,13 @@ func (p *epaxos) getInstance(r pb.ReplicaID, i pb.InstanceNum) *instance {
 		return instItem.(*instance)
 	}
 	return nil
+}
+
+func (p *epaxos) hasAccepted(r pb.ReplicaID, i pb.InstanceNum) bool {
+	if inst := p.getInstance(r, i); inst != nil {
+		return inst.is.Status >= pb.InstanceState_Accepted
+	}
+	return false
 }
 
 func (p *epaxos) hasExecuted(r pb.ReplicaID, i pb.InstanceNum) bool {
@@ -60,7 +67,7 @@ func (p *epaxos) HasExecuted(e executableID) bool {
 func (p *epaxos) seqAndDepsForCommand(
 	cmd *pb.Command, ignoredInstance pb.InstanceID,
 ) (pb.SeqNum, map[pb.InstanceID]struct{}) {
-	maxSeq := p.maxTruncatedSeqNum
+	var maxSeq pb.SeqNum
 	deps := make(map[pb.InstanceID]struct{})
 
 	cmdRage := rangeForCmd(cmd)
@@ -144,7 +151,7 @@ func (p *epaxos) onRequest(cmd *pb.Command) *instance {
 	p.commands[p.id].ReplaceOrInsert(newInst)
 
 	// Transition the new instance into a preAccepted state.
-	newInst.transitionToPreAccept()
+	newInst.transitionTo(pb.InstanceState_PreAccepted)
 	return newInst
 }
 
@@ -154,12 +161,6 @@ func (p *epaxos) prepareToExecute(inst *instance) {
 	// TODO pull executor into a different goroutine and run asynchronously.
 	p.executor.run()
 	// p.truncateCommands()
-}
-
-func (p *epaxos) execute(inst *instance) {
-	inst.assertState(pb.InstanceState_Committed)
-	inst.is.Status = pb.InstanceState_Executed
-	p.deliverExecutedCommand(*inst.is.Command)
 }
 
 // TODO reintroduce instance space truncation.
