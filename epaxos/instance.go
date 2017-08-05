@@ -216,11 +216,21 @@ func (inst *instance) onPreAcceptReply(paReply *pb.PreAcceptReply) {
 		return
 	}
 
-	// Update the instance state based on the PreAcceptReply.
-	changed := inst.updateInstanceData(paReply.UpdatedSeqNum, paReply.UpdatedDeps)
+	// Check whether this PreAccept reply is identical to our preAccept or if
+	// the remote peer returned extra information that we weren't aware of. An
+	// identical fast path quorum allows us to skip the Paxos-Accept phase.
+	newSeq := paReply.UpdatedSeqNum
+	if newSeq > inst.is.SeqNum {
+		inst.is.SeqNum = newSeq
+		inst.differentReplies = true
+	}
 
-	// Update whether we've ever seen any new information in PreAcceptReply messages.
-	inst.differentReplies = inst.differentReplies || changed
+	// Merge remote deps into local deps.
+	oldDepsLen := len(inst.is.Deps)
+	inst.is.Deps = unionDepSlices(inst.is.Deps, paReply.UpdatedDeps)
+	if oldDepsLen != len(inst.is.Deps) {
+		inst.differentReplies = true
+	}
 
 	inst.preAcceptReplies++
 	inst.onEitherPreAcceptReply()
@@ -258,7 +268,7 @@ func (inst *instance) onAccept(a *pb.Accept) {
 	}
 
 	inst.is.Status = pb.InstanceState_Accepted
-	inst.updateInstanceData(a.SeqNum, a.Deps)
+	inst.replaceInstanceData(a.SeqNum, a.Deps)
 	inst.reply(&pb.AcceptOK{})
 }
 
@@ -282,7 +292,7 @@ func (inst *instance) onCommit(c *pb.Commit) {
 
 	inst.is.Status = pb.InstanceState_Committed
 	inst.is.Command = c.Command
-	inst.updateInstanceData(c.SeqNum, c.Deps)
+	inst.replaceInstanceData(c.SeqNum, c.Deps)
 	inst.prepareToExecute()
 }
 
@@ -303,30 +313,9 @@ func (inst *instance) instanceData() pb.InstanceData {
 	return is
 }
 
-// updateInstanceData updates the instance with the new sequence number and the
-// new dependencies. It returns whether the instance was changed.
-func (inst *instance) updateInstanceData(newSeq pb.SeqNum, newDeps []pb.InstanceID) bool {
-	// Check whether this PreAccept reply is identical to our preAccept or if
-	// the remote peer returned extra information that we weren't aware of. An
-	// identical fast path quorum allows us to skip the Paxos-Accept phase.
-	sameSeq := inst.is.SeqNum == newSeq
-	if !sameSeq {
-		// newSeq will always be larger if it is updated, so this
-		// is identical to:
-		//   inst.seq = pb.MaxSeqNum(inst.seq, newSeq)
-		inst.is.SeqNum = newSeq
-	}
-
-	// Length check == equality check, because depsUnion was a union of remote
-	// deps and local deps.
-	sameDeps := len(newDeps) == len(inst.is.Deps)
-	if !sameDeps {
-		// Merge remote deps into local deps.
-		inst.is.Deps = unionDepSlices(inst.is.Deps, newDeps)
-	}
-
-	changed := !(sameSeq && sameDeps)
-	return changed
+func (inst *instance) replaceInstanceData(newSeq pb.SeqNum, newDeps []pb.InstanceID) {
+	inst.is.SeqNum = newSeq
+	inst.is.Deps = newDeps
 }
 
 func depSliceFromMap(depsMap map[pb.InstanceID]struct{}) []pb.InstanceID {

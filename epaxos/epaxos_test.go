@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/google/btree"
+
 	pb "github.com/nvanbenschoten/epaxos/epaxos/epaxospb"
 )
 
@@ -168,22 +170,39 @@ func (n *network) deliverAllMessages() {
 	}
 }
 
-func (n *network) quorumHas(pred func(*epaxos) bool) bool {
+func (n *network) count(pred func(*epaxos) bool) int {
 	count := 0
 	for _, p := range n.peers {
 		if pred(p) {
 			count++
 		}
 	}
-	return n.quorum(count)
+	return count
 }
 
-func (n *network) waitExecuteInstance(inst *instance) bool {
+func (n *network) quorumHas(pred func(*epaxos) bool) bool {
+	return n.quorum(n.count(pred))
+}
+
+func (n *network) allHave(pred func(*epaxos) bool) bool {
+	return len(n.peers) == n.count(pred)
+}
+
+// waitExecuteInstance waits until the given instance has executed.
+// If quorum is true, it will wait until the instance is executed on
+// a quorum of nodes. If it is true, it will wait until the instance
+// is executed on all nodes.
+func (n *network) waitExecuteInstance(inst *instance, quorum bool) bool {
+	waitUntil := n.allHave
+	if quorum {
+		waitUntil = n.quorumHas
+	}
+
 	const maxTicksPerInstanceExecution = 10
 	for i := 0; i < maxTicksPerInstanceExecution; i++ {
 		n.tickAll()
 		n.deliverAllMessages()
-		if n.quorumHas(func(p *epaxos) bool {
+		if waitUntil(func(p *epaxos) bool {
 			return p.hasExecuted(inst.is.ReplicaID, inst.is.InstanceNum)
 		}) {
 			return true
@@ -202,7 +221,7 @@ func TestExecuteCommandsNoFailures(t *testing.T) {
 		cmd := newTestingCommand("a", "z")
 		inst := peer.onRequest(cmd)
 
-		if !n.waitExecuteInstance(inst) {
+		if !n.waitExecuteInstance(inst, true /* quorum */) {
 			t.Fatalf("command execution failed, instance %+v never installed", inst)
 		}
 	}
@@ -220,7 +239,7 @@ func TestExecuteCommandsMinorityFailures(t *testing.T) {
 			cmd := newTestingCommand("a", "z")
 			inst := peer.onRequest(cmd)
 
-			if !n.waitExecuteInstance(inst) {
+			if !n.waitExecuteInstance(inst, true /* quorum */) {
 				t.Fatalf("command execution failed, instance %+v never installed", inst)
 			}
 		}
@@ -238,7 +257,7 @@ func TestExecuteCommandsMajorityFailures(t *testing.T) {
 			cmd := newTestingCommand("a", "z")
 			inst := peer.onRequest(cmd)
 
-			if n.waitExecuteInstance(inst) {
+			if n.waitExecuteInstance(inst, true /* quorum */) {
 				t.Fatalf("command execution succeeded with minority of nodes")
 			}
 		}
@@ -262,7 +281,7 @@ func TestExecuteCommandsOneRTTReads(t *testing.T) {
 		insts = append(insts, inst)
 	}
 	for _, inst := range insts {
-		if !n.waitExecuteInstance(inst) {
+		if !n.waitExecuteInstance(inst, true /* quorum */) {
 			t.Fatalf("command execution failed, instance %+v never installed", inst)
 		}
 	}
@@ -286,7 +305,7 @@ func TestExecuteCommandsOneRTTDifferentKeys(t *testing.T) {
 		insts = append(insts, inst)
 	}
 	for _, inst := range insts {
-		if !n.waitExecuteInstance(inst) {
+		if !n.waitExecuteInstance(inst, true /* quorum */) {
 			t.Fatalf("command execution failed, instance %+v never installed", inst)
 		}
 	}
@@ -301,31 +320,57 @@ func TestExecuteSerializableCommands(t *testing.T) {
 	n := newNetwork(5)
 
 	var insts []*instance
-	for _, peer := range n.peers {
+	for id, peer := range n.peers {
+		if !(id == 0 || id == 1 || id == 2) {
+			continue
+		}
 		cmd := newTestingCommand("a", "z")
 		inst := peer.onRequest(cmd)
 		insts = append(insts, inst)
 	}
 	for _, inst := range insts {
-		if !n.waitExecuteInstance(inst) {
+		if !n.waitExecuteInstance(inst, false /* all nodes */) {
 			t.Fatalf("command execution failed, instance %+v never installed", inst)
 		}
 	}
 
 	peer0 := n.peers[0]
-	instSpace := peer0.commands
+	instSpace := makeInstSpaceComaparable(peer0.commands)
 	execOrder := peer0.ExecutableCommands()
-	for _, peer := range n.peers {
+	for i, peer := range n.peers {
 		if peer == peer0 {
 			continue
 		}
-		otherInstSpace := peer.commands
+		otherInstSpace := makeInstSpaceComaparable(peer.commands)
 		if !reflect.DeepEqual(instSpace, otherInstSpace) {
-			t.Fatalf("instance spaces differ: %+v vs %+v", instSpace, otherInstSpace)
+			t.Fatalf("peer %d: instance spaces differ: \n%+v\n%+v\n%+v", i, instSpace, otherInstSpace)
 		}
 		otherExecOrder := peer.ExecutableCommands()
 		if !reflect.DeepEqual(execOrder, otherExecOrder) {
-			t.Fatalf("command execution orders differ: %+v vs %+v", execOrder, otherExecOrder)
+			t.Fatalf("peer %d: command execution orders differ: %+v vs %+v", i, execOrder, otherExecOrder)
 		}
 	}
+}
+
+func makeInstSpaceComaparable(
+	instSpace map[pb.ReplicaID]*btree.BTree,
+) map[pb.ReplicaID][]pb.InstanceState {
+	cmpInstSpace := make(map[pb.ReplicaID][]pb.InstanceState, len(instSpace))
+	for r, tree := range instSpace {
+		cmpInstSpace[r] = treeToSlice(tree)
+	}
+	return cmpInstSpace
+}
+
+// treeToSlice converts a BTree constaining *instance elements to a slice
+// containing pb.InstanceState elements. This is useful because two BTrees
+// with the same contents may not have the same physical structure, which
+// can throw off reflect.DeepEqual.
+func treeToSlice(tree *btree.BTree) []pb.InstanceState {
+	s := make([]pb.InstanceState, 0, tree.Len())
+	tree.Ascend(func(i btree.Item) bool {
+		s = append(s, i.(*instance).is)
+		return true
+	})
+	return s
 }
