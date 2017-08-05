@@ -3,6 +3,12 @@
 
 [[projects]]
   branch = "master"
+  name = "github.com/AndreasBriese/bbloom"
+  packages = ["."]
+  revision = "28f7e881ca57bc00e028f9ede9f0d9104cfeef5e"
+
+[[projects]]
+  branch = "master"
   name = "github.com/biogo/store"
   packages = ["llrb"]
   revision = "913427a1d5e89604e50ea1db0f28f34966d61602"
@@ -12,6 +18,12 @@
   packages = ["pkg/util/interval"]
   revision = "5b757262d33d814bda1deb2af20161a1f7749df3"
   version = "v1.0.4"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/dgraph-io/badger"
+  packages = [".","skl","table","y"]
+  revision = "270fbc75ac97044dfa64fa7d3c22310aebedc443"
 
 [[projects]]
   name = "github.com/gogo/protobuf"
@@ -57,6 +69,12 @@
 
 [[projects]]
   branch = "master"
+  name = "golang.org/x/sys"
+  packages = ["unix"]
+  revision = "d8f5ea21b9295e315e612b4bcf4bedea93454d4d"
+
+[[projects]]
+  branch = "master"
   name = "golang.org/x/text"
   packages = ["internal/gen","internal/triegen","internal/ucd","secure/bidirule","transform","unicode/bidi","unicode/cldr","unicode/norm","unicode/rangetable"]
   revision = "3bd178b88a8180be2df394a1fbb81313916f0e7b"
@@ -76,6 +94,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "ac1e2f9fe4d1f706615a51c0cddcc66947afc13d9e5af40bbc5bb07757819821"
+  inputs-digest = "e9938a1b985f869be5ed791f55f3b8f0912466a23723ff746251669d65d98d17"
   solver-name = "gps-cdcl"
   solver-version = 1
