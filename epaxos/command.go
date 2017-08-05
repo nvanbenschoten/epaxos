@@ -18,7 +18,7 @@ func (p *epaxos) maxInstanceNum(r pb.ReplicaID) pb.InstanceNum {
 	if maxInst := p.maxInstance(r); maxInst != nil {
 		return maxInst.is.InstanceNum
 	}
-	return p.maxTruncatedInstanceNum[r]
+	return 0
 }
 
 func (p *epaxos) maxSeqNum(r pb.ReplicaID) pb.SeqNum {
@@ -42,14 +42,7 @@ func (p *epaxos) getInstance(r pb.ReplicaID, i pb.InstanceNum) *instance {
 	return nil
 }
 
-func (p *epaxos) hasTruncated(r pb.ReplicaID, i pb.InstanceNum) bool {
-	return i <= p.maxTruncatedInstanceNum[r]
-}
-
 func (p *epaxos) hasExecuted(r pb.ReplicaID, i pb.InstanceNum) bool {
-	if p.hasTruncated(r, i) {
-		return true
-	}
 	if inst := p.getInstance(r, i); inst != nil {
 		return inst.is.Status == pb.InstanceState_Executed
 	}
@@ -160,7 +153,7 @@ func (p *epaxos) prepareToExecute(inst *instance) {
 	p.executor.addExec(inst)
 	// TODO pull executor into a different goroutine and run asynchronously.
 	p.executor.run()
-	p.truncateCommands()
+	// p.truncateCommands()
 }
 
 func (p *epaxos) execute(inst *instance) {
@@ -169,25 +162,26 @@ func (p *epaxos) execute(inst *instance) {
 	p.deliverExecutedCommand(*inst.is.Command)
 }
 
-func (p *epaxos) truncateCommands() {
-	for r, cmds := range p.commands {
-		var executedItems []btree.Item
-		cmds.Ascend(func(i btree.Item) bool {
-			if i.(*instance).is.Status == pb.InstanceState_Executed {
-				executedItems = append(executedItems, i)
-				return true
-			}
-			return false
-		})
-		if len(executedItems) > 0 {
-			curMaxInstNum := p.maxTruncatedInstanceNum[r]
-			for _, executedItem := range executedItems {
-				inst := executedItem.(*instance)
-				p.maxTruncatedSeqNum = pb.MaxSeqNum(p.maxTruncatedSeqNum, inst.is.SeqNum)
-				curMaxInstNum = pb.MaxInstanceNum(curMaxInstNum, inst.is.InstanceNum)
-				cmds.Delete(executedItem)
-			}
-			p.maxTruncatedInstanceNum[r] = curMaxInstNum
-		}
-	}
-}
+// TODO reintroduce instance space truncation.
+// func (p *epaxos) truncateCommands() {
+// 	for r, cmds := range p.commands {
+// 		var executedItems []btree.Item
+// 		cmds.Ascend(func(i btree.Item) bool {
+// 			if i.(*instance).is.Status == pb.InstanceState_Executed {
+// 				executedItems = append(executedItems, i)
+// 				return true
+// 			}
+// 			return false
+// 		})
+// 		if len(executedItems) > 0 {
+// 			curMaxInstNum := p.maxTruncatedInstanceNum[r]
+// 			for _, executedItem := range executedItems {
+// 				inst := executedItem.(*instance)
+// 				p.maxTruncatedSeqNum = pb.MaxSeqNum(p.maxTruncatedSeqNum, inst.is.SeqNum)
+// 				curMaxInstNum = pb.MaxInstanceNum(curMaxInstNum, inst.is.InstanceNum)
+// 				cmds.Delete(executedItem)
+// 			}
+// 			p.maxTruncatedInstanceNum[r] = curMaxInstNum
+// 		}
+// 	}
+// }

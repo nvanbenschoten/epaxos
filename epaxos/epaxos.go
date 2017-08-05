@@ -50,9 +50,10 @@ type epaxos struct {
 	// commands is a map from replica to an ordered tree of instance, indexed by
 	// sequence number. BTree contains *instance elements.
 	commands map[pb.ReplicaID]*btree.BTree
+	// TODO reintroduce instance space truncation.
 	// maxTruncatedInstanceNum is a mapping from replica to the maximum instance
 	// number that has been truncated up to in its command space.
-	maxTruncatedInstanceNum map[pb.ReplicaID]pb.InstanceNum
+	// maxTruncatedInstanceNum map[pb.ReplicaID]pb.InstanceNum
 	// maxTruncatedSeqNum is the maximum sequence number that has been truncated.
 	maxTruncatedSeqNum pb.SeqNum
 	// rangeGroup is used to minimize dependency lists by tracking transitive
@@ -89,14 +90,13 @@ func newEPaxos(c *Config) *epaxos {
 		panic(err.Error())
 	}
 	p := &epaxos{
-		id:                      c.ID,
-		nodes:                   c.Nodes,
-		logger:                  c.Logger,
-		commands:                make(map[pb.ReplicaID]*btree.BTree, len(c.Nodes)),
-		maxTruncatedInstanceNum: make(map[pb.ReplicaID]pb.InstanceNum),
-		rangeGroup:              interval.NewRangeTree(),
-		timers:                  make(map[*tickingTimer]struct{}),
-		rand:                    rand.New(rand.NewSource(c.RandSeed)),
+		id:         c.ID,
+		nodes:      c.Nodes,
+		logger:     c.Logger,
+		commands:   make(map[pb.ReplicaID]*btree.BTree, len(c.Nodes)),
+		rangeGroup: interval.NewRangeTree(),
+		timers:     make(map[*tickingTimer]struct{}),
+		rand:       rand.New(rand.NewSource(c.RandSeed)),
 	}
 	// p.sc = makeStorageCache(p, NewMemoryStorage(c))
 	p.executor = makeExecutor(p)
@@ -167,12 +167,13 @@ func (p *epaxos) Step(m pb.Message) {
 	i := m.InstanceID.InstanceNum
 	inst := p.getInstance(r, i)
 	if inst == nil {
-		if p.hasTruncated(r, i) {
-			// We've already truncated this instance, which means that it was
-			// already committed. Ignore the messsage.
-			p.logger.Debugf("ignoring message to truncated instance: %+v", m)
-			return
-		} else if r == p.id {
+		// if p.hasTruncated(r, i) {
+		// 	// We've already truncated this instance, which means that it was
+		// 	// already committed. Ignore the messsage.
+		// 	p.logger.Debugf("ignoring message to truncated instance: %+v", m)
+		// 	return
+		// }
+		if r == p.id {
 			// We should always know about our own instances.
 			p.logger.Warningf("unknown local instance number: %+v", m)
 			return

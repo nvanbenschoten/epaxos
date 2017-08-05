@@ -129,12 +129,12 @@ message HardState {
     // nodes is the set of all nodes in the EPaxos network.
     repeated uint64 nodes = 2 [(gogoproto.casttype) = "ReplicaID"];
 
+    // TODO reintroduce instance space truncation.
     // truncated_instance_nums is a mapping from ReplicaID to the current
     // InstanceNum truncation index.
-    map<uint64, uint64> truncated_instance_nums = 3 [(gogoproto.castkey) = "ReplicaID",
-                                                     (gogoproto.castvalue) = "InstanceNum"];
-
+    // map<uint64, uint64> truncated_instance_nums = 3 [(gogoproto.castkey) = "ReplicaID",
+    //                                                 (gogoproto.castvalue) = "InstanceNum"];
     // truncated_seq_num is the largest sequence number that has been
     // truncated on this node.
-    uint64 truncated_seq_num = 4 [(gogoproto.casttype) = "SeqNum"];
+    // uint64 truncated_seq_num = 4 [(gogoproto.casttype) = "SeqNum"];
 }
