@@ -30,7 +30,7 @@ type server struct {
 	unavailClients  map[epaxospb.ReplicaID]struct{}
 	pendingRequests map[uint64]chan<- transpb.KVResult
 
-	keyValueMap map[string][]byte
+	kv *store
 }
 
 func newServer(ph parsedHostfile) (*server, error) {
@@ -50,7 +50,11 @@ func newServer(ph parsedHostfile) (*server, error) {
 		clients[epaxospb.ReplicaID(addr.Idx)] = pc
 	}
 
+	kv := newStore()
+
 	config := ph.toPaxosConfig()
+	config.Storage = kv
+
 	return &server{
 		id:              config.ID,
 		node:            epaxos.StartNode(config),
@@ -60,7 +64,7 @@ func newServer(ph parsedHostfile) (*server, error) {
 		clients:         clients,
 		unavailClients:  make(map[epaxospb.ReplicaID]struct{}, len(ph.peerAddrs)),
 		pendingRequests: make(map[uint64]chan<- transpb.KVResult),
-		keyValueMap:     make(map[string][]byte),
+		kv:              kv,
 	}, nil
 }
 
@@ -87,8 +91,6 @@ func (s *server) Run() error {
 				s.registerClientRequest(req)
 				s.node.Propose(ctx, req.Command)
 			case rd := <-s.node.Ready():
-				// saveToStorage(rd.PersistentState)
-
 				if err := s.sendAll(ctx, rd.Messages); err != nil {
 					s.logger.Warning(err)
 				}
@@ -131,14 +133,21 @@ func (s *server) executeCommand(cmd epaxospb.Command) transpb.KVResult {
 	if cmd.Span.EndKey != nil {
 		s.logger.Panicf("unexpected EndKey in command %+v", cmd)
 	}
-	key := string(cmd.Span.Key)
+	key := cmd.Span.Key
+	var val []byte
 	if cmd.Writing {
-		s.keyValueMap[key] = cmd.Data
+		val = cmd.Data
+		s.kv.SetKey(key, val)
+	} else {
+		var err error
+		val, err = s.kv.GetKey(key)
+		if err != nil {
+			s.logger.Panic(err)
+		}
 	}
-	value := s.keyValueMap[key]
 	return transpb.KVResult{
 		Key:   cmd.Span.Key,
-		Value: value,
+		Value: val,
 	}
 }
 

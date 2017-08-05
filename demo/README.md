@@ -2,6 +2,11 @@
 
 This is a sample application using the epaxos library.
 
+The application is a distributed key-value store which provides
+strongly consistent, high availability read and write access. Each
+replica in the system runs on top of [badger](https://github.com/dgraph-io/badger),
+a fast, embedded key-value store. It then uses EPaxos to maintain
+consistency between each of these replicas.
 
 ## Running
 

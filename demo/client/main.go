@@ -65,7 +65,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		writeStr = strings.TrimSpace(writeStr)
+		writeStr = strings.ToLower(strings.TrimSpace(writeStr))
 		write := false
 		switch {
 		case writeStr == "w" || writeStr == "write":

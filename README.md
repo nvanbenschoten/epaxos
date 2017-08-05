@@ -114,9 +114,6 @@ for {
     case <-ticker.C:
         node.Tick()
     case rd := <-node.Ready():
-        if rd.PersistentState != nil {
-            saveToStorage(rd.PersistentState)
-        }
         for _, msg := range rd.Messages {
             send(msg)
         }
