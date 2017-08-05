@@ -25,6 +25,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/lib/pq/oid"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 
@@ -34,6 +35,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 var (
@@ -1405,6 +1407,7 @@ var CmpOps = map[ComparisonOperator]cmpOpOverload{
 		makeEvalTupleIn(TypeTimestampTZ),
 		makeEvalTupleIn(TypeInterval),
 		makeEvalTupleIn(TypeTuple),
+		makeEvalTupleIn(TypeOid),
 	},
 
 	Like: {
@@ -1677,7 +1680,7 @@ type EvalPlanner interface {
 	QueryRow(ctx context.Context, sql string, args ...interface{}) (Datums, error)
 
 	// QualifyWithDatabase resolves a possibly unqualified table name into a
-	// table name that is qualified by database.
+	// normalized table name that is qualified by database.
 	QualifyWithDatabase(ctx context.Context, t *NormalizableTableName) (*TableName, error)
 }
 
@@ -1686,6 +1689,10 @@ type contextHolder func() context.Context
 
 // EvalContext defines the context in which to evaluate an expression, allowing
 // the retrieval of state such as the node ID or statement start time.
+//
+// ATTENTION: Fields from this struct are also represented in
+// distsqlrun.EvalContext. Make sure to keep the two in sync.
+// TODO(andrei): remove or limit the duplication.
 type EvalContext struct {
 	NodeID roachpb.NodeID
 	// The statement timestamp. May be different for every statement.
@@ -1734,10 +1741,30 @@ type EvalContext struct {
 	Mon *mon.MemoryMonitor
 }
 
+// MakeTestingEvalContext returns an EvalContext that includes a MemoryMonitor.
+func MakeTestingEvalContext() EvalContext {
+	ctx := EvalContext{}
+	monitor := mon.MakeMonitor(
+		"test-monitor",
+		nil,           /* curCount */
+		nil,           /* maxHist */
+		-1,            /* increment */
+		math.MaxInt64, /* noteworthy */
+	)
+	monitor.Start(context.Background(), nil, mon.MakeStandaloneBudget(math.MaxInt64))
+	ctx.Mon = &monitor
+	ctx.Ctx = context.Background
+	now := timeutil.Now()
+	ctx.SetTxnTimestamp(now)
+	ctx.SetStmtTimestamp(now)
+	ctx.SetClusterTimestamp(hlc.Timestamp{WallTime: now.Unix()})
+	return ctx
+}
+
 // GetStmtTimestamp retrieves the current statement timestamp as per
 // the evaluation context. The timestamp is guaranteed to be nonzero.
 func (ctx *EvalContext) GetStmtTimestamp() time.Time {
-	// TODO(knz) a zero timestamp should never be read, even during
+	// TODO(knz): a zero timestamp should never be read, even during
 	// Prepare. This will need to be addressed.
 	if !ctx.PrepareOnly && ctx.stmtTimestamp.IsZero() {
 		panic("zero statement timestamp in EvalContext")
@@ -1748,15 +1775,22 @@ func (ctx *EvalContext) GetStmtTimestamp() time.Time {
 // GetClusterTimestamp retrieves the current cluster timestamp as per
 // the evaluation context. The timestamp is guaranteed to be nonzero.
 func (ctx *EvalContext) GetClusterTimestamp() *DDecimal {
-	// TODO(knz) a zero timestamp should never be read, even during
+	// TODO(knz): a zero timestamp should never be read, even during
 	// Prepare. This will need to be addressed.
-	if !ctx.PrepareOnly {
-		if ctx.clusterTimestamp == (hlc.Timestamp{}) {
-			panic("zero cluster timestamp in EvalContext")
-		}
+	if !ctx.PrepareOnly && ctx.clusterTimestamp == (hlc.Timestamp{}) {
+		panic("zero cluster timestamp in EvalContext")
 	}
 
 	return TimestampToDecimal(ctx.clusterTimestamp)
+}
+
+// GetClusterTimestampRaw exposes the clusterTimestamp field. Also see
+// GetClusterTimestamp().
+func (ctx *EvalContext) GetClusterTimestampRaw() hlc.Timestamp {
+	if !ctx.PrepareOnly && ctx.clusterTimestamp == (hlc.Timestamp{}) {
+		panic("zero cluster timestamp in EvalContext")
+	}
+	return ctx.clusterTimestamp
 }
 
 // TimestampToDecimal converts the logical timestamp into a decimal
@@ -1781,7 +1815,7 @@ func TimestampToDecimal(ts hlc.Timestamp) *DDecimal {
 // GetTxnTimestamp retrieves the current transaction timestamp as per
 // the evaluation context. The timestamp is guaranteed to be nonzero.
 func (ctx *EvalContext) GetTxnTimestamp(precision time.Duration) *DTimestampTZ {
-	// TODO(knz) a zero timestamp should never be read, even during
+	// TODO(knz): a zero timestamp should never be read, even during
 	// Prepare. This will need to be addressed.
 	if !ctx.PrepareOnly && ctx.txnTimestamp.IsZero() {
 		panic("zero transaction timestamp in EvalContext")
@@ -1792,12 +1826,21 @@ func (ctx *EvalContext) GetTxnTimestamp(precision time.Duration) *DTimestampTZ {
 // GetTxnTimestampNoZone retrieves the current transaction timestamp as per
 // the evaluation context. The timestamp is guaranteed to be nonzero.
 func (ctx *EvalContext) GetTxnTimestampNoZone(precision time.Duration) *DTimestamp {
-	// TODO(knz) a zero timestamp should never be read, even during
+	// TODO(knz): a zero timestamp should never be read, even during
 	// Prepare. This will need to be addressed.
 	if !ctx.PrepareOnly && ctx.txnTimestamp.IsZero() {
 		panic("zero transaction timestamp in EvalContext")
 	}
 	return MakeDTimestamp(ctx.txnTimestamp, precision)
+}
+
+// GetTxnTimestampRaw exposes the txnTimestamp field. Also see GetTxnTimestamp()
+// and GetTxnTimestampNoZone().
+func (ctx *EvalContext) GetTxnTimestampRaw() time.Time {
+	if !ctx.PrepareOnly && ctx.txnTimestamp.IsZero() {
+		panic("zero transaction timestamp in EvalContext")
+	}
+	return ctx.txnTimestamp
 }
 
 // SetTxnTimestamp sets the corresponding timestamp in the EvalContext.
@@ -2236,7 +2279,7 @@ func (expr *CastExpr) Eval(ctx *EvalContext) (Datum, error) {
 		}
 
 	case *TimestampColType:
-		// TODO(knz) Timestamp from float, decimal.
+		// TODO(knz): Timestamp from float, decimal.
 		switch d := d.(type) {
 		case *DString:
 			return ParseDTimestamp(string(*d), time.Microsecond)
@@ -2254,7 +2297,7 @@ func (expr *CastExpr) Eval(ctx *EvalContext) (Datum, error) {
 		}
 
 	case *TimestampTZColType:
-		// TODO(knz) TimestampTZ from float, decimal.
+		// TODO(knz): TimestampTZ from float, decimal.
 		switch d := d.(type) {
 		case *DString:
 			return ParseDTimestampTZ(string(*d), ctx.GetLocation(), time.Microsecond)
@@ -2271,7 +2314,7 @@ func (expr *CastExpr) Eval(ctx *EvalContext) (Datum, error) {
 		}
 
 	case *IntervalColType:
-		// TODO(knz) Interval from float, decimal.
+		// TODO(knz): Interval from float, decimal.
 		switch v := d.(type) {
 		case *DString:
 			return ParseDInterval(string(*v))
@@ -2345,9 +2388,17 @@ func (expr *CastExpr) Eval(ctx *EvalContext) (Datum, error) {
 				}
 				return queryOid(ctx, typ, NewDString(funcDef.Name))
 			case oidColTypeRegType:
+				colType, err := ParseType(s)
+				if err == nil {
+					datumType := CastTargetToDatumType(colType)
+					return &DOid{kind: typ, DInt: DInt(datumType.Oid()), name: datumType.SQLName()}, nil
+				}
+				// Fall back to searching pg_type, since we don't provide syntax for
+				// every postgres type that we understand OIDs for.
 				// Trim type modifiers, e.g. `numeric(10,3)` becomes `numeric`.
 				s = pgSignatureRegexp.ReplaceAllString(s, "$1")
 				return queryOid(ctx, typ, NewDString(s))
+
 			case oidColTypeRegClass:
 				// Resolving a table name requires looking at the search path to
 				// determine the database that owns it.
@@ -2363,7 +2414,7 @@ func (expr *CastExpr) Eval(ctx *EvalContext) (Datum, error) {
 				// table because we only have the database name, not its OID, which is
 				// what is stored in pg_class. This extra join means we can't use
 				// queryOid like everyone else.
-				return queryOidWithJoin(ctx, typ, NewDString(s),
+				return queryOidWithJoin(ctx, typ, NewDString(tn.Table()),
 					"JOIN pg_catalog.pg_namespace ON relnamespace = pg_namespace.oid",
 					fmt.Sprintf("AND nspname = '%s'", tn.Database()))
 			default:
@@ -2406,6 +2457,11 @@ func (expr *IndirectionExpr) Eval(ctx *EvalContext) (Datum, error) {
 
 	// Index into the DArray, using 1-indexing.
 	arr := MustBeDArray(d)
+
+	// INT2VECTOR uses 0-indexing.
+	if w, ok := d.(*DOidWrapper); ok && w.Oid == oid.T_int2vector {
+		subscriptIdx++
+	}
 	if subscriptIdx < 1 || subscriptIdx > arr.Len() {
 		return DNull, nil
 	}
@@ -2516,7 +2572,7 @@ func (expr *FuncExpr) Eval(ctx *EvalContext) (Datum, error) {
 		// If we are facing a retry error, in particular those generated
 		// by crdb_internal.force_retry(), propagate it unchanged, so that
 		// the executor can see it with the right type.
-		if _, ok := err.(*roachpb.RetryableTxnError); ok {
+		if _, ok := err.(*roachpb.HandledRetryableTxnError); ok {
 			return nil, err
 		}
 		return nil, fmt.Errorf("%s(): %v", expr.Func, err)

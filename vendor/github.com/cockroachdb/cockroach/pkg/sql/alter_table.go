@@ -80,7 +80,7 @@ func (n *alterTableNode) Start(ctx context.Context) error {
 			if d.HasFKConstraint() {
 				return errors.Errorf("adding a REFERENCES constraint via ALTER not supported")
 			}
-			col, idx, err := sqlbase.MakeColumnDefDescs(d, n.p.session.SearchPath)
+			col, idx, err := sqlbase.MakeColumnDefDescs(d, n.p.session.SearchPath, &n.p.evalCtx)
 			if err != nil {
 				return err
 			}
@@ -483,7 +483,7 @@ func (n *alterTableNode) Start(ctx context.Context) error {
 
 func (n *alterTableNode) Next(context.Context) (bool, error)                  { return false, nil }
 func (n *alterTableNode) Close(context.Context)                               {}
-func (n *alterTableNode) Columns() ResultColumns                              { return make(ResultColumns, 0) }
+func (n *alterTableNode) Columns() sqlbase.ResultColumns                      { return make(sqlbase.ResultColumns, 0) }
 func (n *alterTableNode) Ordering() orderingInfo                              { return orderingInfo{} }
 func (n *alterTableNode) Values() parser.Datums                               { return parser.Datums{} }
 func (n *alterTableNode) DebugValues() debugValues                            { return debugValues{} }
@@ -499,7 +499,7 @@ func applyColumnMutation(
 			col.DefaultExpr = nil
 		} else {
 			colDatumType := col.Type.ToDatumType()
-			if err := sqlbase.SanitizeVarFreeExpr(
+			if _, err := sqlbase.SanitizeVarFreeExpr(
 				t.Default, colDatumType, "DEFAULT", searchPath,
 			); err != nil {
 				return err

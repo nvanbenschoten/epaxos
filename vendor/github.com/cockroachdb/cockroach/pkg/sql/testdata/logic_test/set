@@ -1,9 +1,9 @@
 # LogicTest: default
 
-statement error unknown variable: "FOO"
+statement error unknown variable: "foo"
 SET FOO = bar
 
-statement error unknown variable: "FOO"
+statement error unknown variable: "foo"
 SHOW FOO
 
 statement error database "foo" does not exist
@@ -91,6 +91,13 @@ standard_conforming_strings    on
 time zone                      UTC
 transaction isolation level    SERIALIZABLE
 transaction priority           NORMAL
+transaction status             NoTxn
+
+# SESSION_USER is a special keyword, check that SHOW knows about it.
+query T
+SHOW session_user
+----
+root
 
 ## Test SET ... TO DEFAULT works
 
@@ -132,6 +139,9 @@ SET STANDARD_CONFORMING_STRINGS = 'off'
 statement ok
 SET CLIENT_ENCODING = 'UTF8'
 
+statement ok
+SET CLIENT_ENCODING = 'unicode'
+
 statement error non-UTF8 encoding other not supported
 SET CLIENT_ENCODING = 'other'
 
@@ -163,63 +173,3 @@ SET max_index_keys = 32
 query TT
 SELECT name, value FROM system.settings WHERE name = 'testing.str'
 ----
-
-user testuser
-statement error only root is allowed to SET CLUSTER SETTING
-SET CLUSTER SETTING foo = 'bar'
-
-user root
-
-query TT
-SELECT name, value FROM system.settings WHERE name = 'testing.str'
-----
-
-statement ok
-SET CLUSTER SETTING testing.str = 'bar'
-
-query TTT
-SELECT name, value, valueType FROM system.settings WHERE name = 'testing.str'
-----
-testing.str   bar   s
-
-statement ok
-SET CLUSTER SETTING testing.str = 'baz'
-
-query TTT
-SELECT name, value, valueType FROM system.settings WHERE name = 'testing.str'
-----
-testing.str   baz   s
-
-user testuser
-statement error only root is allowed to SET CLUSTER SETTING
-SET CLUSTER SETTING testing.str = 'bar'
-
-user root
-
-query TTT
-SELECT name, value, valueType FROM system.settings WHERE name = 'testing.str'
-----
-testing.str   baz   s
-
-statement ok
-SET CLUSTER SETTING testing.str TO DEFAULT
-
-query TTT
-SELECT name, value, valueType FROM system.settings WHERE name = 'testing.str'
-----
-
-statement ok
-SET CLUSTER SETTING testing.int TO 5
-
-query TTT
-SELECT name, value, valueType FROM system.settings WHERE name = 'testing.int'
-----
-testing.int 5   i
-
-statement error argument of testing.int must be type int, not type string
-SET CLUSTER SETTING testing.int TO 'hello'
-
-query TTT
-SELECT name, value, valueType FROM system.settings WHERE name = 'testing.int'
-----
-testing.int 5 i

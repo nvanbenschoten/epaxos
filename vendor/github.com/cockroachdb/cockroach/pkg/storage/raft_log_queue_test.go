@@ -77,25 +77,28 @@ func TestComputeTruncatableIndex(t *testing.T) {
 		progress        []uint64
 		raftLogSize     int64
 		firstIndex      uint64
+		lastIndex       uint64
 		pendingSnapshot uint64
 		expected        uint64
 	}{
-		{[]uint64{1, 2}, 100, 1, 0, 1},
-		{[]uint64{1, 5, 5}, 100, 1, 0, 1},
-		{[]uint64{1, 5, 5}, 100, 2, 0, 2},
-		{[]uint64{5, 5, 5}, 100, 2, 0, 5},
-		{[]uint64{5, 5, 5}, 100, 2, 1, 2},
-		{[]uint64{5, 5, 5}, 100, 2, 3, 3},
-		{[]uint64{1, 2, 3, 4}, 100, 1, 0, 1},
-		{[]uint64{1, 2, 3, 4}, 100, 2, 0, 2},
+		{[]uint64{1, 2}, 100, 1, 1, 0, 1},
+		{[]uint64{1, 5, 5}, 100, 1, 1, 0, 1},
+		{[]uint64{1, 5, 5}, 100, 2, 2, 0, 2},
+		{[]uint64{5, 5, 5}, 100, 2, 5, 0, 5},
+		{[]uint64{5, 5, 5}, 100, 2, 2, 1, 2},
+		{[]uint64{5, 5, 5}, 100, 2, 3, 3, 3},
+		{[]uint64{1, 2, 3, 4}, 100, 1, 1, 0, 1},
+		{[]uint64{1, 2, 3, 4}, 100, 2, 2, 0, 2},
 		// If over targetSize, should truncate to quorum committed index.
-		{[]uint64{1, 3, 3, 4}, 2000, 1, 0, 3},
-		{[]uint64{1, 3, 3, 4}, 2000, 2, 0, 3},
-		{[]uint64{1, 3, 3, 4}, 2000, 3, 0, 3},
+		{[]uint64{1, 3, 3, 4}, 2000, 1, 3, 0, 3},
+		{[]uint64{1, 3, 3, 4}, 2000, 2, 3, 0, 3},
+		{[]uint64{1, 3, 3, 4}, 2000, 3, 3, 0, 3},
 		// The pending snapshot index affects the quorum commit index.
-		{[]uint64{4}, 2000, 1, 1, 1},
+		{[]uint64{4}, 2000, 1, 1, 1, 1},
 		// Never truncate past the quorum commit index.
-		{[]uint64{3, 3, 6}, 100, 4, 0, 3},
+		{[]uint64{3, 3, 6}, 100, 4, 4, 0, 3},
+		// Never truncate past the last index.
+		{[]uint64{5}, 100, 1, 3, 0, 3},
 	}
 	for i, c := range testCases {
 		status := &raft.Status{
@@ -104,7 +107,8 @@ func TestComputeTruncatableIndex(t *testing.T) {
 		for j, v := range c.progress {
 			status.Progress[uint64(j)] = raft.Progress{Match: v}
 		}
-		out := computeTruncatableIndex(status, c.raftLogSize, targetSize, c.firstIndex, c.pendingSnapshot)
+		out := computeTruncatableIndex(status, c.raftLogSize, targetSize,
+			c.firstIndex, c.lastIndex, c.pendingSnapshot)
 		if !reflect.DeepEqual(c.expected, out) {
 			t.Errorf("%d: computeTruncatableIndex(...) expected %d, but got %d", i, c.expected, out)
 		}
@@ -227,12 +231,15 @@ func TestGetTruncatableIndexes(t *testing.T) {
 // log even when replica scanning is disabled.
 func TestProactiveRaftLogTruncate(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	t.Skip("#9772")
 
+	ctx := context.Background()
 	stopper := stop.NewStopper()
-	defer stopper.Stop(context.TODO())
+	defer stopper.Stop(ctx)
 	store, _ := createTestStore(t, stopper)
 
+	// Note that turning off the replica scanner does not prevent the queues
+	// from processing entries (in this case specifically the raftLogQueue),
+	// just that the scanner will not try to push all replicas onto the queues.
 	store.SetReplicaScannerActive(false)
 
 	r, err := store.GetReplica(1)
@@ -240,35 +247,33 @@ func TestProactiveRaftLogTruncate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r.mu.Lock()
-	oldFirstIndex, err := r.FirstIndex()
-	r.mu.Unlock()
+	oldFirstIndex, err := r.GetFirstIndex()
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Write a few keys to the range. While writing these keys, the raft log
-	// should be proactively truncated even though replica scanning is disabled.
-	for i := 0; i < 2*RaftLogQueueStaleThreshold; i++ {
+	// should be proactively truncated.
+	for i := 0; i < RaftLogQueueStaleThreshold+raftLogCheckFrequency; i++ {
 		key := roachpb.Key(fmt.Sprintf("key%02d", i))
 		args := putArgs(key, []byte(fmt.Sprintf("value%02d", i)))
-		if _, err := client.SendWrapped(context.Background(), store.testSender(), &args); err != nil {
+		if _, err := client.SendWrapped(ctx, store.testSender(), &args); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	// Wait for any asynchronous tasks to finish.
-	stopper.Quiesce(context.TODO())
-
-	r.mu.Lock()
-	newFirstIndex, err := r.FirstIndex()
-	r.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if newFirstIndex <= oldFirstIndex {
-		t.Errorf("log was not correctly truncated, old first index:%d, current first index:%d",
-			oldFirstIndex, newFirstIndex)
-	}
+	// Log truncation is an asynchronous process and while it will usually occur
+	// fairly quickly, there is a slight race between this check and the
+	// truncation, especially when under stress.
+	testutils.SucceedsSoon(t, func() error {
+		newFirstIndex, err := r.GetFirstIndex()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if newFirstIndex <= oldFirstIndex {
+			return errors.Errorf("log was not correctly truncated, old first index:%d, current first index:%d",
+				oldFirstIndex, newFirstIndex)
+		}
+		return nil
+	})
 }

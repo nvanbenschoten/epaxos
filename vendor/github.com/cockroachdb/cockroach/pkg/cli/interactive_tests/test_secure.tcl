@@ -5,52 +5,103 @@ source [file join [file dirname $argv0] common.tcl]
 set certs_dir "/certs"
 set ::env(COCKROACH_INSECURE) "false"
 
-proc start_secure_server {argv certs_dir} {
-    system "mkfifo pid_fifo || true; $argv start --certs-dir=$certs_dir --pid-file=pid_fifo >>stdout.log 2>>stderr.log & cat pid_fifo > server_pid"
-}
-
-proc stop_secure_server {argv certs_dir} {
-    system "set -e; if kill -CONT `cat server_pid`; then $argv quit --certs-dir=$certs_dir || true & sleep 1; kill -9 `cat server_pid` || true; else $argv quit --certs-dir=$certs_dir || true; fi"
-}
-
-start_secure_server $argv $certs_dir
-
 spawn /bin/bash
 send "PS1=':''/# '\r"
 
 set prompt ":/# "
 eexpect $prompt
 
+start_test "Check that --insecure reports that the server is really insecure"
+send "$argv start --insecure\r"
+eexpect "WARNING: RUNNING IN INSECURE MODE"
+eexpect "node starting"
+interrupt
+eexpect $prompt
+end_test
+
+
+proc start_secure_server {argv certs_dir} {
+    report "BEGIN START SECURE SERVER"
+    system "mkfifo pid_fifo || true; $argv start --certs-dir=$certs_dir --pid-file=pid_fifo -s=path=logs/db >>expect-cmd.log 2>&1 & cat pid_fifo > server_pid"
+    report "END START SECURE SERVER"
+}
+
+proc stop_secure_server {argv certs_dir} {
+    report "BEGIN STOP SECURE SERVER"
+    system "$argv quit --certs-dir=$certs_dir"
+    report "END STOP SECURE SERVER"
+}
+
+start_secure_server $argv $certs_dir
+
+start_test "Check 'node ls' works with certificates."
 send "$argv node ls --certs-dir=$certs_dir\r"
 eexpect "id"
 eexpect "1"
 eexpect "1 row"
-
 eexpect $prompt
+end_test
 
-# Cannot create users with empty passwords.
+start_test "Cannot create users with empty passwords."
 send "$argv user set carl --password --certs-dir=$certs_dir\r"
 eexpect "Enter password:"
 send "\r"
 eexpect "empty passwords are not permitted"
-
 eexpect $prompt
+end_test
 
+start_test "Check a password can be changed."
 send "$argv user set carl --password --certs-dir=$certs_dir\r"
 eexpect "Enter password:"
 send "woof\r"
 eexpect "Confirm password:"
 send "woof\r"
 eexpect "INSERT 1\r\n"
-
 eexpect $prompt
+end_test
 
+start_test "Check a password is requested by the client."
 send "$argv sql --certs-dir=$certs_dir --user=carl\r"
 eexpect "Enter password:"
 send "woof\r"
-eexpect "Confirm password:"
-send "woof\r"
 eexpect "carl@"
+send "\\q\r"
+eexpect $prompt
+end_test
+
+start_test "Check that CREATE USER WITH PASSWORD can be used from transactions."
+# Create a user from a transaction.
+send "$argv sql --certs-dir=$certs_dir\r"
+eexpect "root@"
+send "BEGIN TRANSACTION;\r"
+eexpect " ->"
+send "CREATE USER eisen WITH PASSWORD 'hunter2';\r"
+eexpect " ->"
+send "COMMIT TRANSACTION;\r"
+eexpect "root@"
+send "\\q\r"
+# Log in with the correct password.
+eexpect $prompt
+send "$argv sql --certs-dir=$certs_dir --user=eisen\r"
+eexpect "Enter password:"
+send "hunter2\r"
+eexpect "eisen@"
+send "\\q\r"
+# Try to log in with an incorrect password.
+eexpect $prompt
+send "$argv sql --certs-dir=$certs_dir --user=eisen\r"
+eexpect "Enter password:"
+send "*****\r"
+eexpect "Error: pq: invalid password"
+eexpect "Failed running \"sql\""
+# Check that history is scrubbed.
+send "$argv sql --certs-dir=$certs_dir\r"
+eexpect "root@"
+# Ctrl+R eisen
+send "\022eisen"
+eexpect "CREATE USER eisen WITH PASSWORD \\*\\*\\*\\*\\*;"
+interrupt
+end_test
 
 # Terminate with Ctrl+C.
 interrupt

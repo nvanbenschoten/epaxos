@@ -150,6 +150,7 @@ func TestParse(t *testing.T) {
 		{`CREATE TABLE IF NOT EXISTS a AS SELECT * FROM b UNION SELECT * FROM c`},
 		{`CREATE TABLE a AS SELECT * FROM b UNION VALUES ('one', 1) ORDER BY c LIMIT 5`},
 		{`CREATE TABLE IF NOT EXISTS a AS SELECT * FROM b UNION VALUES ('one', 1) ORDER BY c LIMIT 5`},
+		{`CREATE TABLE a (b STRING COLLATE "DE")`},
 
 		{`CREATE VIEW a AS SELECT * FROM b`},
 		{`CREATE VIEW a AS SELECT b.* FROM b LIMIT 5`},
@@ -205,11 +206,11 @@ func TestParse(t *testing.T) {
 		{`SELECT * FROM [EXPLAIN SELECT 1]`},
 
 		{`HELP count`},
-		{`HELP VARCHAR`},
+		{`HELP varchar`},
 
-		{`SHOW BARFOO`},
-		{`SHOW DATABASE`},
-		{`SHOW SYNTAX`},
+		{`SHOW barfoo`},
+		{`SHOW database`},
+		{`SHOW syntax`},
 
 		{`SHOW CLUSTER SETTING a`},
 		{`SHOW CLUSTER SETTING all`},
@@ -347,6 +348,7 @@ func TestParse(t *testing.T) {
 		{`SELECT (ROW())`},
 		{`SELECT (TABLE a)`},
 		{`SELECT 0x1`},
+		{`SELECT 'Deutsch' COLLATE "DE"`},
 
 		{`SELECT 1 FROM t`},
 		{`SELECT 1, 2 FROM t`},
@@ -425,8 +427,8 @@ func TestParse(t *testing.T) {
 		{`SELECT a FROM t AS t1 (c1, c2, c3, c4)`},
 		{`SELECT a FROM s.t`},
 
-		{`SELECT COUNT(DISTINCT a) FROM t`},
-		{`SELECT COUNT(ALL a) FROM t`},
+		{`SELECT count(DISTINCT a) FROM t`},
+		{`SELECT count(ALL a) FROM t`},
 
 		{`SELECT a FROM t WHERE a = b`},
 		{`SELECT a FROM t WHERE NOT (a = b)`},
@@ -472,10 +474,10 @@ func TestParse(t *testing.T) {
 		{`SELECT a FROM t WHERE CASE WHEN a = b THEN c ELSE d END`},
 		{`SELECT a FROM t WHERE CASE WHEN a = b THEN c WHEN b = d THEN d ELSE d END`},
 		{`SELECT a FROM t WHERE CASE aa WHEN a = b THEN c END`},
-		{`SELECT a FROM t WHERE a = B()`},
-		{`SELECT a FROM t WHERE a = B(c)`},
-		{`SELECT a FROM t WHERE a = B(c, d)`},
-		{`SELECT a FROM t WHERE a = COUNT(*)`},
+		{`SELECT a FROM t WHERE a = b()`},
+		{`SELECT a FROM t WHERE a = b(c)`},
+		{`SELECT a FROM t WHERE a = b(c, d)`},
+		{`SELECT a FROM t WHERE a = count(*)`},
 		{`SELECT a FROM t WHERE a = IF(b, c, d)`},
 		{`SELECT a FROM t WHERE a = IFNULL(b, c)`},
 		{`SELECT a FROM t WHERE a = NULLIF(b, c)`},
@@ -590,7 +592,7 @@ func TestParse(t *testing.T) {
 		{`UPDATE a SET b = 3 WHERE a = b RETURNING a, a + b`},
 		{`UPDATE a SET b = 3 WHERE a = b RETURNING NOTHING`},
 
-		{`UPDATE T AS "0" SET K = ''`},                 // "0" lost its quotes
+		{`UPDATE t AS "0" SET k = ''`},                 // "0" lost its quotes
 		{`SELECT * FROM "0" JOIN "0" USING (id, "0")`}, // last "0" lost its quotes.
 
 		{`ALTER DATABASE a RENAME TO b`},
@@ -958,7 +960,7 @@ func TestParseError(t *testing.T) {
 		sql      string
 		expected string
 	}{
-		{`SELECT2 1`, `syntax error at or near "SELECT2"
+		{`SELECT2 1`, `syntax error at or near "select2"
 SELECT2 1
 ^
 `},
@@ -1000,7 +1002,7 @@ SELECT * FROM t WHERE k=
 		},
 		{`CREATE TABLE test (
   CONSTRAINT foo INDEX (bar)
-)`, `syntax error at or near "INDEX"
+)`, `syntax error at or near "index"
 CREATE TABLE test (
   CONSTRAINT foo INDEX (bar)
                  ^
@@ -1078,7 +1080,7 @@ CREATE VIEW a () AS select * FROM b
                ^
 `},
 		{`SELECT FROM t`,
-			`syntax error at or near "FROM"
+			`syntax error at or near "from"
 SELECT FROM t
        ^
 `},
@@ -1151,14 +1153,14 @@ SELECT a FROM foo@{FORCE_INDEX=bar,NO_INDEX_JOIN,FORCE_INDEX=baz}
 		},
 		{
 			`SELECT a FROM foo@{NO_INDEX_JOIN,NO_INDEX_JOIN}`,
-			`NO_INDEX_JOIN specified multiple times at or near "NO_INDEX_JOIN"
+			`NO_INDEX_JOIN specified multiple times at or near "no_index_join"
 SELECT a FROM foo@{NO_INDEX_JOIN,NO_INDEX_JOIN}
                                  ^
 `,
 		},
 		{
 			`SELECT a FROM foo@{NO_INDEX_JOIN,FORCE_INDEX=baz,NO_INDEX_JOIN}`,
-			`NO_INDEX_JOIN specified multiple times at or near "NO_INDEX_JOIN"
+			`NO_INDEX_JOIN specified multiple times at or near "no_index_join"
 SELECT a FROM foo@{NO_INDEX_JOIN,FORCE_INDEX=baz,NO_INDEX_JOIN}
                                                  ^
 `,
@@ -1272,7 +1274,7 @@ SELECT 1 + ANY ARRAY[1, 2, 3]
 	for _, d := range testData {
 		_, err := parse(d.sql)
 		if err == nil || err.Error() != d.expected {
-			t.Fatalf("%s: expected\n%s, but found\n%v", d.sql, d.expected, err)
+			t.Errorf("%s: expected\n%s, but found\n%v", d.sql, d.expected, err)
 		}
 	}
 }

@@ -45,6 +45,8 @@ const (
 	leaseTransferError
 )
 
+const raftLogCheckFrequency = 1 + RaftLogQueueStaleThreshold/4
+
 // ProposalData is data about a command which allows it to be
 // evaluated, proposed to raft, and for the result of the command to
 // be returned to the caller.
@@ -72,7 +74,9 @@ type ProposalData struct {
 	endCmds *endCmds
 
 	// doneCh is used to signal the waiting RPC handler (the contents of
-	// proposalResult come from LocalEvalResult)
+	// proposalResult come from LocalEvalResult).
+	// Attention: this channel is not to be signaled directly downstream of Raft.
+	// Always use ProposalData.finishRaftApplication().
 	doneCh chan proposalResult
 
 	// Local contains the results of evaluating the request
@@ -91,12 +95,35 @@ type ProposalData struct {
 	Request *roachpb.BatchRequest
 }
 
-// finish first invokes the endCmds function and then sends the
-// specified proposalResult on the proposal's done channel. endCmds is
-// invoked here in order to allow the original client to be cancelled
-// and possibly no longer listening to this done channel, and so can't
-// be counted on to invoke endCmds itself.
-func (proposal *ProposalData) finish(pr proposalResult) {
+// finishRaftApplication is called downstream of Raft when a command application
+// has finished. proposal.doneCh is signaled with pr so that the proposer is
+// unblocked.
+//
+// It first invokes the endCmds function and then sends the specified
+// proposalResult on the proposal's done channel. endCmds is invoked here in
+// order to allow the original client to be cancelled and possibly no longer
+// listening to this done channel, and so can't be counted on to invoke endCmds
+// itself.
+//
+// Note: this should not be called upstream of Raft because, in case pr.Err is
+// set, it clears the intents from pr before sending it on the channel. This
+// clearing should not be done upstream of Raft because, in cases of errors
+// encountered upstream of Raft, we might still want to resolve intents:
+// upstream of Raft, pr.intents represent intents encountered by a request, not
+// the current txn's intents.
+func (proposal *ProposalData) finishRaftApplication(pr proposalResult) {
+	if pr.Err != nil {
+		// Clear the intents so that the intent resolution process does not take
+		// place: if an EndTransaction fails, we don't want to commit the txn's
+		// writes. In principle we'd still want to resolve any intents ancountered
+		// by the EndTransaction's batch of requests, other than the current txn's
+		// intents, but we don't make an attempt to separate the two categories of
+		// intents.
+		// TODO(tschottdorf,bdarnell): refactor this so there are two Intents
+		// fields, one for intents to be resolved if the command applies
+		// successfully, and one for intents to be resolved no matter what.
+		pr.Intents = nil
+	}
 	if proposal.endCmds != nil {
 		proposal.endCmds.done(pr.Reply, pr.Err, pr.ProposalRetry)
 		proposal.endCmds = nil
@@ -372,14 +399,22 @@ func (r *Replica) computeChecksumPostApply(
 
 // leasePostApply is called when a RequestLease or TransferLease
 // request is executed for a range.
-func (r *Replica) leasePostApply(
-	ctx context.Context,
-	newLease *roachpb.Lease,
-	replicaID roachpb.ReplicaID,
-	prevLease *roachpb.Lease,
-) {
+func (r *Replica) leasePostApply(ctx context.Context, newLease roachpb.Lease) {
+	r.mu.Lock()
+	replicaID := r.mu.replicaID
+	prevLease := *r.mu.state.Lease
+	r.mu.Unlock()
+
 	iAmTheLeaseHolder := newLease.Replica.ReplicaID == replicaID
 	leaseChangingHands := prevLease.Replica.StoreID != newLease.Replica.StoreID
+
+	if iAmTheLeaseHolder {
+		// Always log lease acquisition for epoch-based leases which are
+		// infrequent.
+		if newLease.Type() == roachpb.LeaseEpoch || (log.V(1) && leaseChangingHands) {
+			log.Infof(ctx, "new range lease %s following %s", newLease, prevLease)
+		}
+	}
 
 	if leaseChangingHands && iAmTheLeaseHolder {
 		// If this replica is a new holder of the lease, update the low water
@@ -393,10 +428,6 @@ func (r *Replica) leasePostApply(
 		// requests, this is kosher). This means that we don't use the old
 		// lease's expiration but instead use the new lease's start to initialize
 		// the timestamp cache low water.
-		if log.V(1) {
-			log.Infof(ctx, "new range lease %s following %s [physicalTime=%s]",
-				newLease, prevLease, r.store.Clock().PhysicalTime())
-		}
 		desc := r.Desc()
 		r.store.tsCacheMu.Lock()
 		for _, keyRange := range makeReplicatedKeyRanges(desc) {
@@ -413,21 +444,30 @@ func (r *Replica) leasePostApply(
 		if r.stats != nil {
 			r.stats.resetRequestCounts()
 		}
-
-		// Gossip the first range whenever its lease is acquired. We check to
-		// make sure the lease is active so that a trailing replica won't process
-		// an old lease request and attempt to gossip the first range.
-		if r.IsFirstRange() && r.IsLeaseValid(newLease, r.store.Clock().Now()) {
-			r.gossipFirstRange(ctx)
-		}
 	}
+
+	// We're setting the new lease after we've updated the timestamp cache in
+	// order to avoid race conditions where a replica starts serving requests
+	// for a lease without first having taken into account requests served
+	// by the previous lease holder.
+	r.mu.Lock()
+	r.mu.state.Lease = &newLease
+	r.mu.Unlock()
+
+	// Gossip the first range whenever its lease is acquired. We check to
+	// make sure the lease is active so that a trailing replica won't process
+	// an old lease request and attempt to gossip the first range.
+	if leaseChangingHands && iAmTheLeaseHolder && r.IsFirstRange() && r.IsLeaseValid(&newLease, r.store.Clock().Now()) {
+		r.gossipFirstRange(ctx)
+	}
+
 	if leaseChangingHands && !iAmTheLeaseHolder {
 		// Also clear and disable the push transaction queue. Any waiters
 		// must be redirected to the new lease holder.
 		r.pushTxnQueue.Clear(true /* disable */)
 	}
 
-	if !iAmTheLeaseHolder && r.IsLeaseValid(newLease, r.store.Clock().Now()) {
+	if !iAmTheLeaseHolder && r.IsLeaseValid(&newLease, r.store.Clock().Now()) {
 		// If this replica is the raft leader but it is not the new lease holder,
 		// then try to transfer the raft leadership to match the lease. We like it
 		// when leases and raft leadership are collocated because that facilitates
@@ -465,7 +505,7 @@ func (r *Replica) leasePostApply(
 
 	// Mark the new lease in the replica's lease history.
 	if r.leaseHistory != nil {
-		r.leaseHistory.add(*newLease)
+		r.leaseHistory.add(newLease)
 	}
 }
 
@@ -532,7 +572,6 @@ func (r *Replica) handleReplicatedEvalResult(
 	r.store.metrics.addMVCCStats(rResult.Delta)
 	rResult.Delta = enginepb.MVCCStats{}
 
-	const raftLogCheckFrequency = 1 + RaftLogQueueStaleThreshold/4
 	if rResult.State.RaftAppliedIndex%raftLogCheckFrequency == 1 {
 		r.store.raftLogQueue.MaybeAdd(r, r.store.Clock().Now())
 	}
@@ -621,13 +660,7 @@ func (r *Replica) handleReplicatedEvalResult(
 	if newLease := rResult.State.Lease; newLease != nil {
 		rResult.State.Lease = nil // for assertion
 
-		r.mu.Lock()
-		replicaID := r.mu.replicaID
-		prevLease := r.mu.state.Lease
-		r.mu.state.Lease = newLease
-		r.mu.Unlock()
-
-		r.leasePostApply(ctx, newLease, replicaID, prevLease)
+		r.leasePostApply(ctx, *newLease)
 	}
 
 	if newTruncState := rResult.State.TruncatedState; newTruncState != nil {

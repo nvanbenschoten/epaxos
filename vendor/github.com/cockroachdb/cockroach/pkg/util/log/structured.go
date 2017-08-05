@@ -19,6 +19,7 @@ package log
 import (
 	"bytes"
 	"fmt"
+	"path/filepath"
 	"strconv"
 
 	"golang.org/x/net/context"
@@ -140,6 +141,17 @@ func MakeMessage(ctx context.Context, format string, args []interface{}) string 
 func addStructured(ctx context.Context, s Severity, depth int, format string, args []interface{}) {
 	file, line, _ := caller.Lookup(depth + 1)
 	msg := MakeMessage(ctx, format, args)
+
+	if s == Severity_FATAL {
+		// we send the `format` str, not the formatted message, as args may be not
+		// be okay to share.
+		reportable := format
+		if reportable == "" && len(args) > 0 {
+			reportable = fmt.Sprintf("%T", args[0])
+		}
+		reportable = fmt.Sprintf("%s:%d %s", filepath.Base(file), line, reportable)
+		sendCrashReport(ctx, reportable, depth+1)
+	}
 	// MakeMessage already added the tags when forming msg, we don't want
 	// eventInternal to prepend them again.
 	eventInternal(ctx, (s >= Severity_ERROR), false /*withTags*/, "%s:%d %s", file, line, msg)

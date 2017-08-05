@@ -26,6 +26,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -48,6 +49,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/migrations"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status"
 	"github.com/cockroachdb/cockroach/pkg/sql"
@@ -153,10 +155,6 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	s.cfg.AmbientCtx.AddLogTag("n", &s.nodeIDContainer)
 
 	ctx := s.AnnotateCtx(context.Background())
-	if s.cfg.Insecure {
-		log.Shout(ctx, log.Severity_WARNING,
-			"running in insecure mode, this is strongly discouraged. See --insecure.")
-	}
 
 	s.rpcContext = rpc.NewContext(s.cfg.AmbientCtx, s.cfg.Config, s.clock, s.stopper)
 	s.rpcContext.HeartbeatCB = func() {
@@ -267,13 +265,15 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	s.registry.AddMetric(distSQLMetrics.CurBytesCount)
 	s.registry.AddMetric(distSQLMetrics.MaxBytesHist)
 
-	// Set up the DistSQL server
+	// Set up the DistSQL server.
 	distSQLCfg := distsqlrun.ServerConfig{
 		AmbientContext: s.cfg.AmbientCtx,
 		DB:             s.db,
-		RPCContext:     s.rpcContext,
-		Stopper:        s.stopper,
-		NodeID:         &s.nodeIDContainer,
+		// DistSQL also uses a DB that bypasses the TxnCoordSender.
+		FlowDB:     client.NewDB(s.distSender, s.clock),
+		RPCContext: s.rpcContext,
+		Stopper:    s.stopper,
+		NodeID:     &s.nodeIDContainer,
 
 		ParentMemoryMonitor: &rootSQLMemoryMonitor,
 		Counter:             distSQLMetrics.CurBytesCount,
@@ -292,6 +292,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	// Set up Executor
 	execCfg := sql.ExecutorConfig{
 		AmbientCtx:              s.cfg.AmbientCtx,
+		ClusterID:               s.ClusterID,
 		NodeID:                  &s.nodeIDContainer,
 		DB:                      s.db,
 		Gossip:                  s.gossip,
@@ -633,7 +634,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.gossip.Start(unresolvedAdvertAddr, filtered)
 	log.Event(ctx, "started gossip")
 
-	s.engines, err = s.cfg.CreateEngines()
+	s.engines, err = s.cfg.CreateEngines(ctx)
 	if err != nil {
 		return errors.Wrap(err, "failed to create engines")
 	}
@@ -693,6 +694,9 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	log.Event(ctx, "started node")
 
+	// TODO(dt): this would be nice if it raven didn't have a race on SetTags.
+	// raven.SetTagsContext(map[string]string{"cluster": s.ClusterID().String(), "node": s.NodeID().String()})
+
 	// We can now add the node registry.
 	s.recorder.AddNode(s.registry, s.node.Descriptor, s.node.startedAt, s.cfg.AdvertiseAddr, s.cfg.HTTPAddr)
 
@@ -722,6 +726,7 @@ func (s *Server) Start(ctx context.Context) error {
 		s.distSender,
 		s.gossip,
 		s.leaseMgr,
+		s.clock,
 	).Start(s.stopper)
 
 	s.sqlExecutor.Start(ctx, &s.adminMemMetrics, s.node.Descriptor)
@@ -852,6 +857,18 @@ func (s *Server) Start(ctx context.Context) error {
 			log.Error(ctx, err)
 		}
 	}
+
+	if s.cfg.ListeningURLFile != "" {
+		pgURL, err := s.cfg.PGURL(url.User(security.RootUser))
+		if err == nil {
+			err = ioutil.WriteFile(s.cfg.ListeningURLFile, []byte(fmt.Sprintf("%s\n", pgURL)), 0644)
+		}
+
+		if err != nil {
+			log.Error(ctx, err)
+		}
+	}
+
 	if err := sdnotify.Ready(); err != nil {
 		log.Errorf(ctx, "failed to signal readiness using systemd protocol: %s", err)
 	}

@@ -39,6 +39,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/gossiputil"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -661,6 +662,88 @@ func TestAllocatorRebalance(t *testing.T) {
 	}
 }
 
+func TestAllocatorRebalanceDeadNodes(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	stopper, _, sp, a, _ := createTestAllocator( /* deterministic */ false)
+	ctx := context.Background()
+	defer stopper.Stop(ctx)
+
+	mockStorePool(sp,
+		[]roachpb.StoreID{1, 2, 3, 4, 5, 6},
+		[]roachpb.StoreID{7, 8},
+		nil)
+
+	ranges := func(rangeCount int32) roachpb.StoreCapacity {
+		return roachpb.StoreCapacity{
+			Capacity:   1000,
+			Available:  1000,
+			RangeCount: rangeCount,
+		}
+	}
+
+	// Initialize 8 stores: where store 6 is the target for rebalancing.
+	sp.detailsMu.Lock()
+	sp.getStoreDetailLocked(1).desc.Capacity = ranges(100)
+	sp.getStoreDetailLocked(2).desc.Capacity = ranges(100)
+	sp.getStoreDetailLocked(3).desc.Capacity = ranges(100)
+	sp.getStoreDetailLocked(4).desc.Capacity = ranges(100)
+	sp.getStoreDetailLocked(5).desc.Capacity = ranges(100)
+	sp.getStoreDetailLocked(6).desc.Capacity = ranges(0)
+	sp.getStoreDetailLocked(7).desc.Capacity = ranges(100)
+	sp.getStoreDetailLocked(8).desc.Capacity = ranges(100)
+	sp.detailsMu.Unlock()
+
+	replicas := func(storeIDs ...roachpb.StoreID) []roachpb.ReplicaDescriptor {
+		res := make([]roachpb.ReplicaDescriptor, len(storeIDs))
+		for i, storeID := range storeIDs {
+			res[i].StoreID = storeID
+		}
+		return res
+	}
+
+	// Each test case should describe a repair situation which has a lower
+	// priority than the previous test case.
+	testCases := []struct {
+		existing []roachpb.ReplicaDescriptor
+		expected roachpb.StoreID
+	}{
+		// 3/3 live -> 3/4 live: ok
+		{replicas(1, 2, 3), 6},
+		// 2/3 live -> 2/4 live: nope
+		{replicas(1, 2, 7), 0},
+		// 4/4 live -> 4/5 live: ok
+		{replicas(1, 2, 3, 4), 6},
+		// 3/4 live -> 3/5 live: ok
+		{replicas(1, 2, 3, 7), 6},
+		// 5/5 live -> 5/6 live: ok
+		{replicas(1, 2, 3, 4, 5), 6},
+		// 4/5 live -> 4/6 live: ok
+		{replicas(1, 2, 3, 4, 7), 6},
+		// 3/5 live -> 3/6 live: nope
+		{replicas(1, 2, 3, 7, 8), 0},
+	}
+
+	for _, c := range testCases {
+		t.Run("", func(t *testing.T) {
+			result, err := a.RebalanceTarget(
+				ctx, config.Constraints{}, c.existing, firstRange)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.expected > 0 {
+				if result == nil {
+					t.Fatalf("expected %d, but found nil", c.expected)
+				} else if c.expected != result.StoreID {
+					t.Fatalf("expected %d, but found %d", c.expected, result.StoreID)
+				}
+			} else if result != nil {
+				t.Fatalf("expected nil, but found %d", result.StoreID)
+			}
+		})
+	}
+}
+
 // TestAllocatorRebalanceThrashing tests that the rebalancer does not thrash
 // when replica counts are balanced, within the appropriate thresholds, across
 // stores.
@@ -1029,12 +1112,6 @@ func TestAllocatorShouldTransferLease(t *testing.T) {
 func TestAllocatorTransferLeaseTargetLoadBased(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	// TODO(a-robinson): Remove when load-based lease rebalancing is the default.
-	defer func(v bool) {
-		EnableLoadBasedLeaseRebalancing = v
-	}(EnableLoadBasedLeaseRebalancing)
-	EnableLoadBasedLeaseRebalancing = true
-
 	stopper, g, _, storePool, _ := createTestStorePool(
 		TestTimeUntilStoreDeadOff, true /* deterministic */, nodeStatusLive)
 	defer stopper.Stop(context.Background())
@@ -1221,66 +1298,66 @@ func TestLoadBasedLeaseRebalanceScore(t *testing.T) {
 		expected      int32
 	}{
 		// Evenly balanced leases stay balanced if requests are even
-		{1, 0 * time.Millisecond, 10, 1, 10, 10, -1},
-		{1, 0 * time.Millisecond, 100, 1, 100, 100, -10},
-		{1, 0 * time.Millisecond, 1000, 1, 1000, 1000, -100},
-		{1, 10 * time.Millisecond, 10, 1, 10, 10, -1},
-		{1, 10 * time.Millisecond, 100, 1, 100, 100, -10},
-		{1, 10 * time.Millisecond, 1000, 1, 1000, 1000, -100},
-		{1, 50 * time.Millisecond, 10, 1, 10, 10, -1},
-		{1, 50 * time.Millisecond, 100, 1, 100, 100, -10},
-		{1, 50 * time.Millisecond, 1000, 1, 1000, 1000, -100},
-		{1000, 0 * time.Millisecond, 10, 1000, 10, 10, -1},
-		{1000, 0 * time.Millisecond, 100, 1000, 100, 100, -10},
-		{1000, 0 * time.Millisecond, 1000, 1000, 1000, 1000, -100},
-		{1000, 10 * time.Millisecond, 10, 1000, 10, 10, -1},
-		{1000, 10 * time.Millisecond, 100, 1000, 100, 100, -10},
-		{1000, 10 * time.Millisecond, 1000, 1000, 1000, 1000, -100},
-		{1000, 50 * time.Millisecond, 10, 1000, 10, 10, -1},
-		{1000, 50 * time.Millisecond, 100, 1000, 100, 100, -10},
-		{1000, 50 * time.Millisecond, 1000, 1000, 1000, 1000, -100},
+		{1, 0 * time.Millisecond, 10, 1, 10, 10, -2},
+		{1, 0 * time.Millisecond, 100, 1, 100, 100, -21},
+		{1, 0 * time.Millisecond, 1000, 1, 1000, 1000, -200},
+		{1, 10 * time.Millisecond, 10, 1, 10, 10, -2},
+		{1, 10 * time.Millisecond, 100, 1, 100, 100, -21},
+		{1, 10 * time.Millisecond, 1000, 1, 1000, 1000, -200},
+		{1, 50 * time.Millisecond, 10, 1, 10, 10, -2},
+		{1, 50 * time.Millisecond, 100, 1, 100, 100, -21},
+		{1, 50 * time.Millisecond, 1000, 1, 1000, 1000, -200},
+		{1000, 0 * time.Millisecond, 10, 1000, 10, 10, -2},
+		{1000, 0 * time.Millisecond, 100, 1000, 100, 100, -21},
+		{1000, 0 * time.Millisecond, 1000, 1000, 1000, 1000, -200},
+		{1000, 10 * time.Millisecond, 10, 1000, 10, 10, -2},
+		{1000, 10 * time.Millisecond, 100, 1000, 100, 100, -21},
+		{1000, 10 * time.Millisecond, 1000, 1000, 1000, 1000, -200},
+		{1000, 50 * time.Millisecond, 10, 1000, 10, 10, -2},
+		{1000, 50 * time.Millisecond, 100, 1000, 100, 100, -21},
+		{1000, 50 * time.Millisecond, 1000, 1000, 1000, 1000, -200},
 		// No latency favors lease balance despite request imbalance
-		{10, 0 * time.Millisecond, 100, 1, 100, 100, -10},
-		{100, 0 * time.Millisecond, 100, 1, 100, 100, -10},
-		{1000, 0 * time.Millisecond, 100, 1, 100, 100, -10},
-		{10000, 0 * time.Millisecond, 100, 1, 100, 100, -10},
+		{10, 0 * time.Millisecond, 100, 1, 100, 100, -21},
+		{100, 0 * time.Millisecond, 100, 1, 100, 100, -21},
+		{1000, 0 * time.Millisecond, 100, 1, 100, 100, -21},
+		{10000, 0 * time.Millisecond, 100, 1, 100, 100, -21},
 		// Adding some latency changes that (perhaps a bit too much?)
-		{10, 1 * time.Millisecond, 100, 1, 100, 100, 3},
-		{100, 1 * time.Millisecond, 100, 1, 100, 100, 17},
-		{1000, 1 * time.Millisecond, 100, 1, 100, 100, 31},
-		{10000, 1 * time.Millisecond, 100, 1, 100, 100, 45},
-		{10, 10 * time.Millisecond, 100, 1, 100, 100, 37},
-		{100, 10 * time.Millisecond, 100, 1, 100, 100, 85},
-		{1000, 10 * time.Millisecond, 100, 1, 100, 100, 133},
-		{10000, 10 * time.Millisecond, 100, 1, 100, 100, 181},
+		{10, 1 * time.Millisecond, 100, 1, 100, 100, -8},
+		{100, 1 * time.Millisecond, 100, 1, 100, 100, 6},
+		{1000, 1 * time.Millisecond, 100, 1, 100, 100, 20},
+		{10000, 1 * time.Millisecond, 100, 1, 100, 100, 34},
+		{10, 10 * time.Millisecond, 100, 1, 100, 100, 26},
+		{100, 10 * time.Millisecond, 100, 1, 100, 100, 74},
+		{1000, 10 * time.Millisecond, 100, 1, 100, 100, 122},
+		{10000, 10 * time.Millisecond, 100, 1, 100, 100, 170},
 		// Moving from very unbalanced to more balanced
-		{1, 1 * time.Millisecond, 0, 1, 500, 200, 480},
-		{1, 1 * time.Millisecond, 0, 10, 500, 200, 453},
-		{1, 1 * time.Millisecond, 0, 100, 500, 200, 425},
-		{1, 10 * time.Millisecond, 0, 1, 500, 200, 480},
-		{1, 10 * time.Millisecond, 0, 10, 500, 200, 385},
-		{1, 10 * time.Millisecond, 0, 100, 500, 200, 289},
-		{1, 50 * time.Millisecond, 0, 1, 500, 200, 480},
-		{1, 50 * time.Millisecond, 0, 10, 500, 200, 323},
-		{1, 50 * time.Millisecond, 0, 100, 500, 200, 165},
-		{1, 1 * time.Millisecond, 50, 1, 500, 250, 425},
-		{1, 1 * time.Millisecond, 50, 10, 500, 250, 391},
-		{1, 1 * time.Millisecond, 50, 100, 500, 250, 355},
-		{1, 10 * time.Millisecond, 50, 1, 500, 250, 425},
-		{1, 10 * time.Millisecond, 50, 10, 500, 250, 305},
-		{1, 10 * time.Millisecond, 50, 100, 500, 250, 185},
-		{1, 50 * time.Millisecond, 50, 1, 500, 250, 425},
-		{1, 50 * time.Millisecond, 50, 10, 500, 250, 229},
-		{1, 50 * time.Millisecond, 50, 100, 500, 250, 31},
+		{1, 1 * time.Millisecond, 0, 1, 500, 200, 459},
+		{1, 1 * time.Millisecond, 0, 10, 500, 200, 432},
+		{1, 1 * time.Millisecond, 0, 100, 500, 200, 404},
+		{1, 10 * time.Millisecond, 0, 1, 500, 200, 459},
+		{1, 10 * time.Millisecond, 0, 10, 500, 200, 364},
+		{1, 10 * time.Millisecond, 0, 100, 500, 200, 268},
+		{1, 50 * time.Millisecond, 0, 1, 500, 200, 459},
+		{1, 50 * time.Millisecond, 0, 10, 500, 200, 302},
+		{1, 50 * time.Millisecond, 0, 100, 500, 200, 144},
+		{1, 1 * time.Millisecond, 50, 1, 500, 250, 400},
+		{1, 1 * time.Millisecond, 50, 10, 500, 250, 364},
+		{1, 1 * time.Millisecond, 50, 100, 500, 250, 330},
+		{1, 10 * time.Millisecond, 50, 1, 500, 250, 400},
+		{1, 10 * time.Millisecond, 50, 10, 500, 250, 280},
+		{1, 10 * time.Millisecond, 50, 100, 500, 250, 160},
+		{1, 50 * time.Millisecond, 50, 1, 500, 250, 400},
+		{1, 50 * time.Millisecond, 50, 10, 500, 250, 202},
+		{1, 50 * time.Millisecond, 50, 100, 500, 250, 6},
 		// Miscellaneous cases with uneven balance
-		{10, 1 * time.Millisecond, 100, 1, 50, 67, -47},
-		{1, 1 * time.Millisecond, 50, 10, 100, 67, 35},
-		{10, 10 * time.Millisecond, 100, 1, 50, 67, -25},
-		{1, 10 * time.Millisecond, 50, 10, 100, 67, 11},
-		{10, 1 * time.Millisecond, 100, 1, 50, 80, -47},
-		{1, 1 * time.Millisecond, 50, 10, 100, 80, 31},
-		{10, 10 * time.Millisecond, 100, 1, 50, 80, -19},
-		{1, 10 * time.Millisecond, 50, 10, 100, 80, 3},
+		{10, 1 * time.Millisecond, 100, 1, 50, 67, -56},
+		{1, 1 * time.Millisecond, 50, 10, 100, 67, 26},
+		{10, 10 * time.Millisecond, 100, 1, 50, 67, -32},
+		{1, 10 * time.Millisecond, 50, 10, 100, 67, 4},
+		{10, 1 * time.Millisecond, 100, 1, 50, 80, -56},
+		{1, 1 * time.Millisecond, 50, 10, 100, 80, 22},
+		{10, 10 * time.Millisecond, 100, 1, 50, 80, -28},
+		{1, 10 * time.Millisecond, 50, 10, 100, 80, -6},
 	}
 
 	for _, c := range testCases {
@@ -1779,6 +1856,91 @@ func TestAllocatorComputeAction(t *testing.T) {
 	}
 }
 
+func TestAllocatorComputeActionRemoveDead(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	// Each test case should describe a repair situation which has a lower
+	// priority than the previous test case.
+	testCases := []struct {
+		zone           config.ZoneConfig
+		desc           roachpb.RangeDescriptor
+		expectedAction AllocatorAction
+		live           []roachpb.StoreID
+		dead           []roachpb.StoreID
+	}{
+		// Needs three replicas, one is dead, but there is no replacement.
+		{
+			zone: config.ZoneConfig{
+				NumReplicas: 3,
+			},
+			desc: roachpb.RangeDescriptor{
+				Replicas: []roachpb.ReplicaDescriptor{
+					{
+						StoreID:   1,
+						NodeID:    1,
+						ReplicaID: 1,
+					},
+					{
+						StoreID:   2,
+						NodeID:    2,
+						ReplicaID: 2,
+					},
+					{
+						StoreID:   3,
+						NodeID:    3,
+						ReplicaID: 3,
+					},
+				},
+			},
+			expectedAction: AllocatorNoop,
+			live:           []roachpb.StoreID{1, 2},
+			dead:           []roachpb.StoreID{3},
+		},
+		// Needs three replicas, one is dead, but there is a replacement.
+		{
+			zone: config.ZoneConfig{
+				NumReplicas: 3,
+			},
+			desc: roachpb.RangeDescriptor{
+				Replicas: []roachpb.ReplicaDescriptor{
+					{
+						StoreID:   1,
+						NodeID:    1,
+						ReplicaID: 1,
+					},
+					{
+						StoreID:   2,
+						NodeID:    2,
+						ReplicaID: 2,
+					},
+					{
+						StoreID:   3,
+						NodeID:    3,
+						ReplicaID: 3,
+					},
+				},
+			},
+			expectedAction: AllocatorRemoveDead,
+			live:           []roachpb.StoreID{1, 2, 4},
+			dead:           []roachpb.StoreID{3},
+		},
+	}
+
+	stopper, _, sp, a, _ := createTestAllocator( /* deterministic */ false)
+	ctx := context.Background()
+	defer stopper.Stop(ctx)
+
+	for i, tcase := range testCases {
+		mockStorePool(sp, tcase.live, tcase.dead, nil)
+
+		action, _ := a.ComputeAction(ctx, tcase.zone, &tcase.desc)
+		if tcase.expectedAction != action {
+			t.Errorf("Test case %d expected action %d, got action %d", i, tcase.expectedAction, action)
+			continue
+		}
+	}
+}
+
 // TestAllocatorComputeActionNoStorePool verifies that
 // ComputeAction returns AllocatorNoop when storePool is nil.
 func TestAllocatorComputeActionNoStorePool(t *testing.T) {
@@ -2132,7 +2294,7 @@ func Example_rebalancing() {
 		g,
 		clock,
 		newMockNodeLiveness(nodeStatusLive).nodeLivenessFunc,
-		TestTimeUntilStoreDeadOff,
+		settings.TestingDuration(TestTimeUntilStoreDeadOff),
 		/* deterministic */ true,
 	)
 	alloc := MakeAllocator(sp, func(string) (time.Duration, bool) {

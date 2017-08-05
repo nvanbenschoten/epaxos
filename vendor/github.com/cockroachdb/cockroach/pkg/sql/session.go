@@ -32,6 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/mon"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
@@ -53,7 +54,7 @@ import (
 // all execution because traces are gathered for all transactions even
 // if they are not output.
 var traceTxnThreshold = settings.RegisterDurationSetting(
-	"sql.trace.txn.threshold",
+	"sql.trace.txn.enable_threshold",
 	"duration beyond which all transactions are traced (set to 0 to disable)", 0)
 
 // traceSessionEventLogEnabled can be used to enable the event log
@@ -61,7 +62,7 @@ var traceTxnThreshold = settings.RegisterDurationSetting(
 // non-trivial performance impact and also reveals SQL statements
 // which may be a privacy concern.
 var traceSessionEventLogEnabled = settings.RegisterBoolSetting(
-	"sql.trace.session.eventlog.enabled",
+	"sql.trace.session_eventlog.enabled",
 	"set to true to enable session tracing", false)
 
 // debugTrace7881Enabled causes all SQL transactions to be traced using their
@@ -72,46 +73,73 @@ var debugTrace7881Enabled = envutil.EnvOrDefaultBool("COCKROACH_TRACE_7881", fal
 // logStatementsExecuteEnabled causes the Executor to log executed
 // statements and, if any, resulting errors.
 var logStatementsExecuteEnabled = settings.RegisterBoolSetting(
-	"sql.log.statements.execute.enabled",
+	"sql.trace.log_statement_execute",
 	"set to true to enable logging of executed statements", false)
 
 // span baggage key used for marking a span
 const keyFor7881Sample = "found#7881"
 
-// distSQLExecMode controls if and when the Executor uses DistSQL.
-type distSQLExecMode int
+// DistSQLExecMode controls if and when the Executor uses DistSQL.
+type DistSQLExecMode int64
 
 const (
-	// distSQLOff means that we never use distSQL.
-	distSQLOff distSQLExecMode = iota
-	// distSQLAuto means that we automatically decide on a case-by-case basis if
+	// DistSQLOff means that we never use distSQL.
+	DistSQLOff DistSQLExecMode = iota
+	// DistSQLAuto means that we automatically decide on a case-by-case basis if
 	// we use distSQL.
-	distSQLAuto
-	// distSQLOn means that we use distSQL for queries that are supported.
-	distSQLOn
-	// distSQLAlways means that we only use distSQL; unsupported queries fail.
-	distSQLAlways
+	DistSQLAuto
+	// DistSQLOn means that we use distSQL for queries that are supported.
+	DistSQLOn
+	// DistSQLAlways means that we only use distSQL; unsupported queries fail.
+	DistSQLAlways
 )
 
-func distSQLExecModeFromString(val string) distSQLExecMode {
+func (m DistSQLExecMode) String() string {
+	switch m {
+	case DistSQLOff:
+		return "off"
+	case DistSQLAuto:
+		return "auto"
+	case DistSQLOn:
+		return "on"
+	case DistSQLAlways:
+		return "always"
+	default:
+		return fmt.Sprintf("invalid (%d)", m)
+	}
+}
+
+// DistSQLExecModeFromInt converts an int64 into a DistSQLExecMode
+func DistSQLExecModeFromInt(val int64) DistSQLExecMode {
+	return DistSQLExecMode(val)
+}
+
+// DistSQLExecModeFromString converts a string into a DistSQLExecMode
+func DistSQLExecModeFromString(val string) DistSQLExecMode {
 	switch strings.ToUpper(val) {
 	case "OFF":
-		return distSQLOff
+		return DistSQLOff
 	case "AUTO":
-		return distSQLAuto
+		return DistSQLAuto
 	case "ON":
-		return distSQLOn
+		return DistSQLOn
 	case "ALWAYS":
-		return distSQLAlways
+		return DistSQLAlways
 	default:
 		panic(fmt.Sprintf("unknown DistSQL mode %s", val))
 	}
 }
 
-// defaultDistSQLMode controls the default DistSQL mode (see above). It can
-// still be overridden per-session using `SET DIST_SQL = ...`.
-var defaultDistSQLMode = distSQLExecModeFromString(
-	envutil.EnvOrDefaultString("COCKROACH_DISTSQL_MODE", "OFF"),
+// DistSQLClusterExecMode controls the cluster default for when DistSQL is used.
+var DistSQLClusterExecMode = settings.RegisterEnumSetting(
+	"sql.defaults.distsql",
+	"Default distributed SQL execution mode",
+	"Auto",
+	map[int64]string{
+		int64(DistSQLOff):  "Off",
+		int64(DistSQLAuto): "Auto",
+		int64(DistSQLOn):   "On",
+	},
 )
 
 // Session contains the state of a SQL client connection.
@@ -133,7 +161,7 @@ type Session struct {
 	DefaultIsolationLevel enginepb.IsolationType
 	// DistSQLMode indicates whether to run queries using the distributed
 	// execution engine.
-	DistSQLMode distSQLExecMode
+	DistSQLMode DistSQLExecMode
 	// Location indicates the current time zone.
 	Location *time.Location
 	// SearchPath is a list of databases that will be searched for a table name
@@ -262,10 +290,14 @@ func NewSession(
 	ctx context.Context, args SessionArgs, e *Executor, remote net.Addr, memMetrics *MemoryMetrics,
 ) *Session {
 	ctx = e.AnnotateCtx(ctx)
+	distSQLMode := DistSQLExecModeFromInt(DistSQLClusterExecMode.Get())
+	if e.cfg.TestingKnobs.OverrideDistSQLMode != nil {
+		distSQLMode = DistSQLExecModeFromInt(e.cfg.TestingKnobs.OverrideDistSQLMode.Get())
+	}
 	s := &Session{
 		Database:         args.Database,
-		DistSQLMode:      defaultDistSQLMode,
-		SearchPath:       parser.SearchPath{"pg_catalog"},
+		DistSQLMode:      distSQLMode,
+		SearchPath:       sqlbase.DefaultSearchPath,
 		Location:         time.UTC,
 		User:             args.User,
 		virtualSchemas:   e.virtualSchemas,
@@ -398,7 +430,7 @@ func (s *Session) newPlanner(e *Executor, txn *client.Txn) *planner {
 		phaseTimes: s.phaseTimes,
 	}
 
-	p.semaCtx = parser.MakeSemaContext()
+	p.semaCtx = parser.MakeSemaContext(s.User == security.RootUser)
 	p.semaCtx.Location = &s.Location
 	p.semaCtx.SearchPath = s.SearchPath
 
@@ -560,6 +592,12 @@ type txnState struct {
 	// This must be constant for the lifetime of a SQL transaction.
 	sqlTimestamp time.Time
 
+	// The transaction's isolation level.
+	isolation enginepb.IsolationType
+
+	// The transaction's priority.
+	priority roachpb.UserPriority
+
 	// mon tracks txn-bound objects like the running state of
 	// planNode in the midst of performing a computation. We
 	// host this here instead of TxnState because TxnState is
@@ -570,16 +608,33 @@ type txnState struct {
 // resetForNewSQLTxn (re)initializes the txnState for a new transaction.
 // It creates a new client.Txn and initializes it using the session defaults.
 // txnState.State will be set to Open.
-func (ts *txnState) resetForNewSQLTxn(e *Executor, s *Session) {
+//
+// implicitTxn is set if the txn corresponds to an implicit SQL txn and controls
+// the debug name of the txn.
+// retryIntent is set if the client is prepared to handle the RestartWait and
+// controls state transitions in case of error.
+// sqlTimestamp is the timestamp to report for current_timestamp(), now() etc.
+// isolation is the transaction's isolation level.
+// priority is the transaction's priority.
+func (ts *txnState) resetForNewSQLTxn(
+	e *Executor,
+	s *Session,
+	implicitTxn bool,
+	retryIntent bool,
+	sqlTimestamp time.Time,
+	isolation enginepb.IsolationType,
+	priority roachpb.UserPriority,
+) {
 	if ts.sp != nil {
 		panic(fmt.Sprintf("txnState.reset() called on ts with active span. How come "+
 			"finishSQLTxn() wasn't called previously? ts: %+v", ts))
 	}
 
+	ts.retryIntent = retryIntent
 	// Reset state vars to defaults.
-	ts.retryIntent = false
-	ts.autoRetry = false
+	ts.autoRetry = true
 	ts.commitSeen = false
+	ts.sqlTimestamp = sqlTimestamp
 
 	// Create a context for this transaction. It will include a
 	// root span that will contain everything executed as part of the
@@ -621,7 +676,15 @@ func (ts *txnState) resetForNewSQLTxn(e *Executor, s *Session) {
 	ts.mon.Start(ctx, &s.mon, mon.BoundAccount{})
 
 	ts.txn = client.NewTxn(e.cfg.DB)
-	if err := ts.txn.SetIsolation(s.DefaultIsolationLevel); err != nil {
+	if implicitTxn {
+		ts.txn.SetDebugName(sqlImplicitTxnName)
+	} else {
+		ts.txn.SetDebugName(sqlTxnName)
+	}
+	if err := ts.setIsolationLevel(isolation); err != nil {
+		panic(err)
+	}
+	if err := ts.setPriority(priority); err != nil {
 		panic(err)
 	}
 	ts.State = Open
@@ -651,10 +714,8 @@ func (ts *txnState) resetStateAndTxn(state TxnStateEnum) {
 	ts.txn = nil
 }
 
-// finishSQLTxn closes the root span for the current SQL txn.
-// This needs to be called before resetForNewSQLTransaction() is called for
-// starting another SQL txn.
-// The session context is just used for logging the SQL trace.
+// finishSQLTxn closes the root span for the current SQL txn.  This needs to be
+// called before resetForNewSQLTxn() is called for starting another SQL txn.
 func (ts *txnState) finishSQLTxn(sessionCtx context.Context) {
 	ts.mon.Stop(ts.Ctx)
 	if ts.sp == nil {
@@ -682,9 +743,9 @@ func (ts *txnState) updateStateAndCleanupOnErr(err error, e *Executor) {
 	if err == nil {
 		panic("updateStateAndCleanupOnErr called with no error")
 	}
-	if retErr, ok := err.(*roachpb.RetryableTxnError); !ok ||
+	if retErr, ok := err.(*roachpb.HandledRetryableTxnError); !ok ||
 		!ts.willBeRetried() ||
-		!ts.txn.IsRetryableErrMeantForTxn(retErr) {
+		!ts.txn.IsRetryableErrMeantForTxn(*retErr) {
 
 		// We can't or don't want to retry this txn, so the txn is over.
 		e.TxnAbortCount.Inc(1)
@@ -710,6 +771,22 @@ func (ts *txnState) hijackCtx(ctx context.Context) func() {
 	return func() {
 		ts.Ctx = origCtx
 	}
+}
+
+func (ts *txnState) setIsolationLevel(isolation enginepb.IsolationType) error {
+	if err := ts.txn.SetIsolation(isolation); err != nil {
+		return err
+	}
+	ts.isolation = isolation
+	return nil
+}
+
+func (ts *txnState) setPriority(userPriority roachpb.UserPriority) error {
+	if err := ts.txn.SetUserPriority(userPriority); err != nil {
+		return err
+	}
+	ts.priority = userPriority
+	return nil
 }
 
 type schemaChangerCollection struct {
@@ -768,7 +845,8 @@ func (scc *schemaChangerCollection) execSchemaChanges(
 		sc.testingKnobs = e.cfg.SchemaChangerTestingKnobs
 		sc.distSQLPlanner = e.distSQLPlanner
 		for r := retry.Start(base.DefaultRetryOptions()); r.Next(); {
-			if err := sc.exec(ctx); err != nil {
+			evalCtx := createSchemaChangeEvalCtx(e.cfg.Clock.Now())
+			if err := sc.exec(ctx, evalCtx); err != nil {
 				if err != errExistingSchemaChangeLease {
 					log.Warningf(ctx, "Error executing schema change: %s", err)
 				}

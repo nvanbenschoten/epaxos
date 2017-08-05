@@ -13,15 +13,19 @@ import (
 	"github.com/pkg/errors"
 )
 
-var enterpriseEnabled = settings.RegisterBoolSetting(
-	"enterprise.enabled", "set to true to enable Enterprise features", false,
-)
+// EnterpriseEnabled is temporary, until #14114 is implemented.
+var EnterpriseEnabled = func() *settings.BoolSetting {
+	name := "enterprise.enabled"
+	s := settings.RegisterBoolSetting(name, "set to true to enable Enterprise features", false)
+	settings.Hide(name)
+	return s
+}()
 
 // CheckEnterpriseEnabled returns a non-nil error if the requested enterprise
 // feature is not enabled, including information or a link explaining how to
 // enable it.
 func CheckEnterpriseEnabled(feature string) error {
-	if enterpriseEnabled.Get() {
+	if EnterpriseEnabled.Get() {
 		return nil
 	}
 	// TODO(dt): link to some stable URL that then redirects to a helpful page

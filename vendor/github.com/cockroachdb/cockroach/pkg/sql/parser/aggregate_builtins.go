@@ -23,7 +23,9 @@ import (
 
 	"github.com/cockroachdb/apd"
 	"github.com/cockroachdb/cockroach/pkg/sql/mon"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
+	"github.com/pkg/errors"
 )
 
 func initAggregateBuiltins() {
@@ -66,7 +68,7 @@ type AggregateFunc interface {
 	// Result returns the current value of the accumulation. This value
 	// will be a deep copy of any AggregateFunc internal state, so that
 	// it will not be mutated by additional calls to Add.
-	Result() Datum
+	Result() (Datum, error)
 
 	// Close closes out the AggregateFunc and allows it to release any memory it
 	// requested during aggregation, and must be called upon completion of the
@@ -120,7 +122,7 @@ var Aggregates = map[string][]Builtin{
 	},
 
 	"concat_agg": {
-		// TODO(knz) When CockroachDB supports STRING_AGG, CONCAT_AGG(X)
+		// TODO(knz): When CockroachDB supports STRING_AGG, CONCAT_AGG(X)
 		// should be substituted to STRING_AGG(X, '') and executed as
 		// such (no need for a separate implementation).
 		makeAggBuiltin(TypeString, TypeString, newStringConcatAggregate,
@@ -257,11 +259,11 @@ func (a *identAggregate) Add(_ context.Context, datum Datum) error {
 }
 
 // Result returns the value most recently passed to Add.
-func (a *identAggregate) Result() Datum {
+func (a *identAggregate) Result() (Datum, error) {
 	// It is significant that identAggregate returns nil, and not DNull,
 	// if no result was known via Add(). See
 	// sql.(*aggregateFuncHolder).Eval() for details.
-	return a.val
+	return a.val, nil
 }
 
 // Close is no-op in aggregates using constant space.
@@ -291,11 +293,11 @@ func (a *arrayAggregate) Add(ctx context.Context, datum Datum) error {
 }
 
 // Result returns an array of all datums passed to Add.
-func (a *arrayAggregate) Result() Datum {
+func (a *arrayAggregate) Result() (Datum, error) {
 	if len(a.arr.Array) > 0 {
-		return a.arr
+		return a.arr, nil
 	}
-	return DNull
+	return DNull, nil
 }
 
 // Close allows the aggregate to release the memory it requested during
@@ -332,24 +334,23 @@ func (a *avgAggregate) Add(ctx context.Context, datum Datum) error {
 }
 
 // Result returns the average of all datums passed to Add.
-func (a *avgAggregate) Result() Datum {
-	sum := a.agg.Result()
+func (a *avgAggregate) Result() (Datum, error) {
+	sum, err := a.agg.Result()
+	if err != nil {
+		return nil, err
+	}
 	if sum == DNull {
-		return sum
+		return sum, nil
 	}
 	switch t := sum.(type) {
 	case *DFloat:
-		return NewDFloat(*t / DFloat(a.count))
+		return NewDFloat(*t / DFloat(a.count)), nil
 	case *DDecimal:
 		count := apd.New(int64(a.count), 0)
 		_, err := DecimalCtx.Quo(&t.Decimal, &t.Decimal, count)
-		if err != nil {
-			// TODO(mjibson): see #13640
-			panic(err)
-		}
-		return t
+		return t, err
 	default:
-		panic(fmt.Sprintf("unexpected SUM result type: %s", t))
+		return nil, errors.Errorf("unexpected SUM result type: %s", t)
 	}
 }
 
@@ -391,16 +392,16 @@ func (a *concatAggregate) Add(ctx context.Context, datum Datum) error {
 	return nil
 }
 
-func (a *concatAggregate) Result() Datum {
+func (a *concatAggregate) Result() (Datum, error) {
 	if !a.sawNonNull {
-		return DNull
+		return DNull, nil
 	}
 	if a.forBytes {
 		res := DBytes(a.result.String())
-		return &res
+		return &res, nil
 	}
 	res := DString(a.result.String())
-	return &res
+	return &res, nil
 }
 
 // Close allows the aggregate to release the memory it requested during
@@ -430,11 +431,11 @@ func (a *boolAndAggregate) Add(_ context.Context, datum Datum) error {
 	return nil
 }
 
-func (a *boolAndAggregate) Result() Datum {
+func (a *boolAndAggregate) Result() (Datum, error) {
 	if !a.sawNonNull {
-		return DNull
+		return DNull, nil
 	}
-	return MakeDBool(DBool(a.result))
+	return MakeDBool(DBool(a.result)), nil
 }
 
 // Close is part of the AggregateFunc interface.
@@ -458,11 +459,11 @@ func (a *boolOrAggregate) Add(_ context.Context, datum Datum) error {
 	return nil
 }
 
-func (a *boolOrAggregate) Result() Datum {
+func (a *boolOrAggregate) Result() (Datum, error) {
 	if !a.sawNonNull {
-		return DNull
+		return DNull, nil
 	}
-	return MakeDBool(DBool(a.result))
+	return MakeDBool(DBool(a.result)), nil
 }
 
 // Close is part of the AggregateFunc interface.
@@ -484,8 +485,8 @@ func (a *countAggregate) Add(_ context.Context, datum Datum) error {
 	return nil
 }
 
-func (a *countAggregate) Result() Datum {
-	return NewDInt(DInt(a.count))
+func (a *countAggregate) Result() (Datum, error) {
+	return NewDInt(DInt(a.count)), nil
 }
 
 // Close is part of the AggregateFunc interface.
@@ -518,11 +519,11 @@ func (a *MaxAggregate) Add(_ context.Context, datum Datum) error {
 }
 
 // Result returns the largest value passed to Add.
-func (a *MaxAggregate) Result() Datum {
+func (a *MaxAggregate) Result() (Datum, error) {
 	if a.max == nil {
-		return DNull
+		return DNull, nil
 	}
-	return a.max
+	return a.max, nil
 }
 
 // Close is part of the AggregateFunc interface.
@@ -555,11 +556,11 @@ func (a *MinAggregate) Add(_ context.Context, datum Datum) error {
 }
 
 // Result returns the smallest value passed to Add.
-func (a *MinAggregate) Result() Datum {
+func (a *MinAggregate) Result() (Datum, error) {
 	if a.min == nil {
-		return DNull
+		return DNull, nil
 	}
-	return a.min
+	return a.min, nil
 }
 
 // Close is part of the AggregateFunc interface.
@@ -586,11 +587,11 @@ func (a *smallIntSumAggregate) Add(_ context.Context, datum Datum) error {
 }
 
 // Result returns the sum.
-func (a *smallIntSumAggregate) Result() Datum {
+func (a *smallIntSumAggregate) Result() (Datum, error) {
 	if !a.seenNonNull {
-		return DNull
+		return DNull, nil
 	}
-	return NewDInt(DInt(a.sum))
+	return NewDInt(DInt(a.sum)), nil
 }
 
 // Close is part of the AggregateFunc interface.
@@ -647,9 +648,9 @@ func (a *intSumAggregate) Add(_ context.Context, datum Datum) error {
 }
 
 // Result returns the sum.
-func (a *intSumAggregate) Result() Datum {
+func (a *intSumAggregate) Result() (Datum, error) {
 	if !a.seenNonNull {
-		return DNull
+		return DNull, nil
 	}
 	dd := &DDecimal{}
 	if a.large {
@@ -657,7 +658,7 @@ func (a *intSumAggregate) Result() Datum {
 	} else {
 		dd.SetCoefficient(a.intSum)
 	}
-	return dd
+	return dd, nil
 }
 
 // Close is part of the AggregateFunc interface.
@@ -687,13 +688,13 @@ func (a *decimalSumAggregate) Add(_ context.Context, datum Datum) error {
 }
 
 // Result returns the sum.
-func (a *decimalSumAggregate) Result() Datum {
+func (a *decimalSumAggregate) Result() (Datum, error) {
 	if !a.sawNonNull {
-		return DNull
+		return DNull, nil
 	}
 	dd := &DDecimal{}
 	dd.Set(&a.sum)
-	return dd
+	return dd, nil
 }
 
 // Close is part of the AggregateFunc interface.
@@ -720,11 +721,11 @@ func (a *floatSumAggregate) Add(_ context.Context, datum Datum) error {
 }
 
 // Result returns the sum.
-func (a *floatSumAggregate) Result() Datum {
+func (a *floatSumAggregate) Result() (Datum, error) {
 	if !a.sawNonNull {
-		return DNull
+		return DNull, nil
 	}
-	return NewDFloat(DFloat(a.sum))
+	return NewDFloat(DFloat(a.sum)), nil
 }
 
 // Close is part of the AggregateFunc interface.
@@ -751,11 +752,11 @@ func (a *intervalSumAggregate) Add(_ context.Context, datum Datum) error {
 }
 
 // Result returns the sum.
-func (a *intervalSumAggregate) Result() Datum {
+func (a *intervalSumAggregate) Result() (Datum, error) {
 	if !a.sawNonNull {
-		return DNull
+		return DNull, nil
 	}
-	return &DInterval{Duration: a.sum}
+	return &DInterval{Duration: a.sum}, nil
 }
 
 // Close is part of the AggregateFunc interface.
@@ -782,7 +783,7 @@ func (a *intVarianceAggregate) Add(ctx context.Context, datum Datum) error {
 	return a.agg.Add(ctx, &a.tmpDec)
 }
 
-func (a *intVarianceAggregate) Result() Datum {
+func (a *intVarianceAggregate) Result() (Datum, error) {
 	return a.agg.Result()
 }
 
@@ -815,11 +816,11 @@ func (a *floatVarianceAggregate) Add(_ context.Context, datum Datum) error {
 	return nil
 }
 
-func (a *floatVarianceAggregate) Result() Datum {
+func (a *floatVarianceAggregate) Result() (Datum, error) {
 	if a.count < 2 {
-		return DNull
+		return DNull, nil
 	}
-	return NewDFloat(DFloat(a.sqrDiff / (float64(a.count) - 1)))
+	return NewDFloat(DFloat(a.sqrDiff / (float64(a.count) - 1))), nil
 }
 
 // Close is part of the AggregateFunc interface.
@@ -878,23 +879,22 @@ func (a *decimalVarianceAggregate) Add(_ context.Context, datum Datum) error {
 	return a.ed.Err()
 }
 
-func (a *decimalVarianceAggregate) Result() Datum {
+func (a *decimalVarianceAggregate) Result() (Datum, error) {
 	if a.count.Cmp(decimalTwo) < 0 {
-		return DNull
+		return DNull, nil
 	}
 	a.ed.Sub(&a.tmp, &a.count, decimalOne)
 	dd := &DDecimal{}
 	a.ed.Ctx = DecimalCtx
 	a.ed.Quo(&dd.Decimal, &a.sqrDiff, &a.tmp)
-	// TODO(mjibson): see #13640
 	if err := a.ed.Err(); err != nil {
-		panic(err)
+		return nil, err
 	}
 	// Remove trailing zeros. Depending on the order in which the input
 	// is processed, some number of trailing zeros could be added to the
 	// output. Remove them so that the results are the same regardless of order.
 	dd.Decimal.Reduce(&dd.Decimal)
-	return dd
+	return dd, nil
 }
 
 // Close is part of the AggregateFunc interface.
@@ -920,23 +920,22 @@ func (a *stdDevAggregate) Add(ctx context.Context, datum Datum) error {
 }
 
 // Result computes the square root of the variance.
-func (a *stdDevAggregate) Result() Datum {
-	variance := a.agg.Result()
+func (a *stdDevAggregate) Result() (Datum, error) {
+	variance, err := a.agg.Result()
+	if err != nil {
+		return nil, err
+	}
 	if variance == DNull {
-		return variance
+		return variance, nil
 	}
 	switch t := variance.(type) {
 	case *DFloat:
-		return NewDFloat(DFloat(math.Sqrt(float64(*t))))
+		return NewDFloat(DFloat(math.Sqrt(float64(*t)))), nil
 	case *DDecimal:
-		// TODO(mjibson): see #13640
 		_, err := DecimalCtx.Sqrt(&t.Decimal, &t.Decimal)
-		if err != nil {
-			panic(err)
-		}
-		return t
+		return t, err
 	}
-	panic(fmt.Sprintf("unexpected variance result type: %s", variance.ResolvedType()))
+	return nil, errors.Errorf("unexpected variance result type: %s", variance.ResolvedType())
 }
 
 // Close is part of the AggregateFunc interface.
@@ -1017,10 +1016,10 @@ func (p *Parser) IsAggregate(n *SelectClause, searchPath SearchPath) bool {
 // aggregate functions or window functions, returning an error in either case.
 func (p *Parser) AssertNoAggregationOrWindowing(expr Expr, op string, searchPath SearchPath) error {
 	if p.AggregateInExpr(expr, searchPath) {
-		return fmt.Errorf("aggregate functions are not allowed in %s", op)
+		return pgerror.NewErrorf(pgerror.CodeGroupingError, "aggregate functions are not allowed in %s", op)
 	}
 	if p.WindowFuncInExpr(expr) {
-		return fmt.Errorf("window functions are not allowed in %s", op)
+		return pgerror.NewErrorf(pgerror.CodeWindowingError, "window functions are not allowed in %s", op)
 	}
 	return nil
 }

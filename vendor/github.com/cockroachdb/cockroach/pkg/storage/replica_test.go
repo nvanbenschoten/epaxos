@@ -44,10 +44,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -1820,7 +1822,7 @@ func TestLeaseConcurrent(t *testing.T) {
 						// otherwise its context (and tracing span) may be used after the
 						// client cleaned up.
 						delete(tc.repl.mu.proposals, proposal.idKey)
-						proposal.finish(proposalResult{Err: roachpb.NewErrorf(origMsg)})
+						proposal.finishRaftApplication(proposalResult{Err: roachpb.NewErrorf(origMsg)})
 						return
 					}
 					if err := defaultSubmitProposalLocked(tc.repl, proposal); err != nil {
@@ -4448,6 +4450,48 @@ func TestPushTxnUpgradeExistingTxn(t *testing.T) {
 	}
 }
 
+// TestPushTxnQueryPusheerHasNewerVersion verifies that PushTxn
+// uses the newer version of the pushee in a push request.
+func TestPushTxnQueryPusheeHasNewerVersion(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	tc := testContext{}
+	stopper := stop.NewStopper()
+	defer stopper.Stop(context.TODO())
+	tc.Start(t, stopper)
+
+	key := roachpb.Key("key")
+	pushee := newTransaction("test", key, 1, enginepb.SERIALIZABLE, tc.Clock())
+	pushee.Priority = 1
+	pushee.Epoch = 12345
+	pushee.Sequence = 2
+	ts := tc.Clock().Now()
+	pushee.Timestamp = ts
+	pushee.LastHeartbeat = ts
+
+	pusher := newTransaction("test", key, 1, enginepb.SERIALIZABLE, tc.Clock())
+	pusher.Priority = 2
+
+	_, btH := beginTxnArgs(key, pushee)
+	put := putArgs(key, key)
+	if _, pErr := maybeWrapWithBeginTransaction(context.Background(), tc.Sender(), btH, &put); pErr != nil {
+		t.Fatal(pErr)
+	}
+
+	// Make sure the pushee in the request has updated information on the pushee.
+	// Since the pushee has higher priority than the pusher, the push should fail.
+	pushee.Priority = 4
+	args := pushTxnArgs(pusher, pushee, roachpb.PUSH_ABORT)
+	args.NewPriorities = false
+
+	_, pErr := tc.SendWrapped(&args)
+	if pErr == nil {
+		t.Fatalf("unexpected push success")
+	}
+	if _, ok := pErr.GetDetail().(*roachpb.TransactionPushError); !ok {
+		t.Errorf("expected txn push error: %s", pErr)
+	}
+}
+
 // TestPushTxnHeartbeatTimeout verifies that a txn which
 // hasn't been heartbeat within 2x the heartbeat interval can be
 // pushed/aborted.
@@ -4481,12 +4525,9 @@ func TestPushTxnHeartbeatTimeout(t *testing.T) {
 		{hlc.Timestamp{}, ns * 2, roachpb.PUSH_TIMESTAMP, false},
 		{hlc.Timestamp{}, ns * 2, roachpb.PUSH_ABORT, false},
 		{hlc.Timestamp{}, ns * 2, roachpb.PUSH_TOUCH, false},
-		{ts, ns*2 + 1, roachpb.PUSH_TIMESTAMP, false},
-		{ts, ns*2 + 1, roachpb.PUSH_ABORT, false},
-		{ts, ns*2 + 1, roachpb.PUSH_TOUCH, false},
-		{ts, ns*2 + 2, roachpb.PUSH_TIMESTAMP, true},
-		{ts, ns*2 + 2, roachpb.PUSH_ABORT, true},
-		{ts, ns*2 + 2, roachpb.PUSH_TOUCH, true},
+		{ts, ns*2 + 1, roachpb.PUSH_TIMESTAMP, true},
+		{ts, ns*2 + 1, roachpb.PUSH_ABORT, true},
+		{ts, ns*2 + 1, roachpb.PUSH_TOUCH, true},
 	}
 
 	for i, test := range testCases {
@@ -4499,22 +4540,22 @@ func TestPushTxnHeartbeatTimeout(t *testing.T) {
 			pushee.LastHeartbeat = test.heartbeat
 		}
 		_, btH := beginTxnArgs(key, pushee)
-		btH.Timestamp = tc.repl.store.Clock().Now()
+		btH.Timestamp = pushee.Timestamp
 		put := putArgs(key, key)
 		if _, pErr := maybeWrapWithBeginTransaction(context.Background(), tc.Sender(), btH, &put); pErr != nil {
 			t.Fatalf("%d: %s", i, pErr)
 		}
 
-		// Now, attempt to push the transaction with Now set to our current time.
+		// Now, attempt to push the transaction with Now set to the txn start time + offset.
 		args := pushTxnArgs(pusher, pushee, test.pushType)
-		args.Now = now.Add(test.timeOffset, 0)
+		args.Now = pushee.Timestamp.Add(test.timeOffset, 0)
 		args.PushTo = args.Now
 
 		reply, pErr := tc.SendWrapped(&args)
 
 		if test.expSuccess != (pErr == nil) {
-			t.Fatalf("%d: expSuccess=%t; got pErr %s, reply %+v", i,
-				test.expSuccess, pErr, reply)
+			t.Fatalf("%d: expSuccess=%t; got pErr %s, args=%+v, reply=%+v", i,
+				test.expSuccess, pErr, args, reply)
 		}
 		if pErr != nil {
 			if _, ok := pErr.GetDetail().(*roachpb.TransactionPushError); !ok {
@@ -7144,6 +7185,55 @@ func TestAmbiguousResultErrorOnRetry(t *testing.T) {
 	}
 }
 
+// TestGCWithoutThreshold validates that GCRequest only declares the threshold
+// keys which are subject to change, and that it does not access these keys if
+// it does not declare them.
+func TestGCWithoutThreshold(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	desc := roachpb.RangeDescriptor{StartKey: roachpb.RKey("a"), EndKey: roachpb.RKey("z")}
+	ctx := context.Background()
+
+	options := []hlc.Timestamp{{}, hlc.Timestamp{}.Add(1, 0)}
+
+	for i, keyThresh := range options {
+		for j, txnThresh := range options {
+			func() {
+				var gc roachpb.GCRequest
+				var spans SpanSet
+
+				gc.Threshold = keyThresh
+				gc.TxnSpanGCThreshold = txnThresh
+				declareKeysGC(desc, roachpb.Header{}, &gc, &spans)
+
+				if num, exp := spans.len(), i+j+1; num != exp {
+					t.Fatalf("(%s,%s): expected %d declared keys, found %d",
+						keyThresh, txnThresh, exp, num)
+				}
+
+				eng := engine.NewInMem(roachpb.Attributes{}, 1<<20)
+				defer eng.Close()
+
+				batch := eng.NewBatch()
+				defer batch.Close()
+				rw := makeSpanSetBatch(batch, &spans)
+
+				var resp roachpb.GCResponse
+
+				if _, err := evalGC(ctx, rw, CommandArgs{
+					Args: &gc,
+					EvalCtx: ReplicaEvalContext{
+						repl: &Replica{},
+						ss:   &spans,
+					},
+				}, &resp); err != nil {
+					t.Fatalf("at (%s,%s): %s", keyThresh, txnThresh, err)
+				}
+			}()
+		}
+	}
+}
+
 // TestCommandTimeThreshold verifies that commands outside the replica GC
 // threshold fail.
 func TestCommandTimeThreshold(t *testing.T) {
@@ -7703,5 +7793,107 @@ func TestMakeTimestampCacheRequest(t *testing.T) {
 				t.Fatalf("%s", pretty.Diff(c.expected, cr))
 			}
 		})
+	}
+}
+
+func TestCommandTooLarge(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	defer settings.TestingSetByteSize(&maxCommandSize, 1024)()
+
+	tc := testContext{}
+	stopper := stop.NewStopper()
+	defer stopper.Stop(context.TODO())
+	tc.Start(t, stopper)
+
+	args := putArgs(roachpb.Key("k"),
+		[]byte(strings.Repeat("a", int(maxCommandSize.Get()))))
+	if _, pErr := tc.SendWrapped(&args); !testutils.IsPError(pErr, "command is too large") {
+		t.Fatalf("did not get expected error: %v", pErr)
+	}
+}
+
+// Test that, if the application of a Raft command fails, intents are not
+// resolved. This is because we don't want intent resolution to take place if an
+// EndTransaction fails.
+func TestErrorInRaftApplicationClearsIntents(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	var storeKnobs StoreTestingKnobs
+	var filterActive int32
+	key := roachpb.Key("a")
+	rkey, err := keys.Addr(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeKnobs.TestingApplyFilter = func(filterArgs storagebase.ApplyFilterArgs) *roachpb.Error {
+		if atomic.LoadInt32(&filterActive) == 1 && filterArgs.StartKey.Equal(rkey) {
+			return roachpb.NewErrorf("boom")
+		}
+		return nil
+	}
+	s, _, kvDB := serverutils.StartServer(t, base.TestServerArgs{
+		Knobs: base.TestingKnobs{Store: &storeKnobs}})
+	defer s.Stopper().Stop(context.TODO())
+
+	splitKey := roachpb.Key("b")
+	if err := kvDB.AdminSplit(context.TODO(), splitKey); err != nil {
+		t.Fatal(err)
+	}
+
+	txn := newTransaction("test", key, roachpb.NormalUserPriority,
+		enginepb.SERIALIZABLE, s.Clock(),
+	)
+	btArgs, _ := beginTxnArgs(key, txn)
+	var ba roachpb.BatchRequest
+	ba.Header.Txn = txn
+	ba.Add(&btArgs)
+	if _, pErr := s.DistSender().Send(context.TODO(), ba); pErr != nil {
+		t.Fatal(pErr.GoError())
+	}
+
+	// Fail future command applications.
+	atomic.StoreInt32(&filterActive, 1)
+
+	// Propose an EndTransaction with a remote intent. The _remote_ part is
+	// important because intents local to the txn's range are resolved inline with
+	// the EndTransaction execution.
+	// We do this by using replica.propose() directly, as opposed to going through
+	// the DistSender, because we want to inspect the proposal's result after the
+	// injected error.
+	etArgs, _ := endTxnArgs(txn, true /* commit */)
+	etArgs.IntentSpans = []roachpb.Span{{Key: roachpb.Key("bb")}}
+	ba = roachpb.BatchRequest{}
+	ba.Timestamp = s.Clock().Now()
+	ba.Header.Txn = txn
+	ba.Add(&etArgs)
+	// Get a reference to the txn's replica.
+	stores := s.GetStores().(*Stores)
+	rangeID, _, err := stores.LookupReplica(rkey, nil /* end */)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := stores.GetStore(s.GetFirstStoreID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repl, err := store.GetReplica(rangeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exLease, _ := repl.getLease()
+	ch, _, err := repl.propose(
+		context.Background(), exLease, ba, nil /* endCmds */, nil, /* spans */
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	propRes := <-ch
+	if !testutils.IsPError(propRes.Err, "boom") {
+		t.Fatalf("expected injected error, got: %v", propRes.Err)
+	}
+	if len(propRes.Intents) != 0 {
+		t.Fatal("expected intents to have been cleared")
 	}
 }

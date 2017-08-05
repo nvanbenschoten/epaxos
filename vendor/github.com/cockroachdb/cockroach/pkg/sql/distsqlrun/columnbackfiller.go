@@ -22,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 )
@@ -34,10 +33,8 @@ type columnBackfiller struct {
 	added   []sqlbase.ColumnDescriptor
 	dropped []sqlbase.ColumnDescriptor
 	// updateCols is a slice of all column descriptors that are being modified.
-	updateCols   []sqlbase.ColumnDescriptor
-	updateValues parser.Datums
-
-	nonNullViolationColumnName string
+	updateCols  []sqlbase.ColumnDescriptor
+	updateExprs []parser.TypedExpr
 }
 
 var _ processor = &columnBackfiller{}
@@ -98,11 +95,6 @@ func (cb *columnBackfiller) init() error {
 			}
 		}
 	}
-	// Set the eval context timestamps.
-	pTime := timeutil.Now()
-	cb.flowCtx.evalCtx = parser.EvalContext{}
-	cb.flowCtx.evalCtx.SetTxnTimestamp(pTime)
-	cb.flowCtx.evalCtx.SetStmtTimestamp(pTime)
 	defaultExprs, err := sqlbase.MakeDefaultExprs(cb.added, &parser.Parser{}, &cb.flowCtx.evalCtx)
 	if err != nil {
 		return err
@@ -110,23 +102,17 @@ func (cb *columnBackfiller) init() error {
 
 	cb.updateCols = append(cb.added, cb.dropped...)
 	if len(cb.dropped) > 0 || addingNonNullableColumn || len(defaultExprs) > 0 {
-		// Evaluate default values.
-		cb.updateValues = make(parser.Datums, len(cb.updateCols))
-		for j, col := range cb.added {
+		// Populate default values.
+		cb.updateExprs = make([]parser.TypedExpr, len(cb.updateCols))
+		for j := range cb.added {
 			if defaultExprs == nil || defaultExprs[j] == nil {
-				cb.updateValues[j] = parser.DNull
+				cb.updateExprs[j] = parser.DNull
 			} else {
-				cb.updateValues[j], err = defaultExprs[j].Eval(&cb.flowCtx.evalCtx)
-				if err != nil {
-					return sqlbase.NewInvalidSchemaDefinitionError(err)
-				}
-			}
-			if !col.Nullable && cb.updateValues[j].Compare(&cb.flowCtx.evalCtx, parser.DNull) == 0 {
-				cb.nonNullViolationColumnName = col.Name
+				cb.updateExprs[j] = defaultExprs[j]
 			}
 		}
 		for j := range cb.dropped {
-			cb.updateValues[j+len(cb.added)] = parser.DNull
+			cb.updateExprs[j+len(cb.added)] = parser.DNull
 		}
 	}
 
@@ -211,7 +197,8 @@ func (cb *columnBackfiller) runChunk(
 		}
 
 		oldValues := make(parser.Datums, len(ru.FetchCols))
-		b := &client.Batch{}
+		updateValues := make(parser.Datums, len(cb.updateExprs))
+		b := txn.NewBatch()
 		rowLength := 0
 		for i := int64(0); i < chunkSize; i++ {
 			row, err := cb.fetcher.NextRowDecoded(ctx)
@@ -221,10 +208,17 @@ func (cb *columnBackfiller) runChunk(
 			if row == nil {
 				break
 			}
-			// Throw an error if there's a new non-null column that has no default,
-			// and if we have found some data in the table already.
-			if cb.nonNullViolationColumnName != "" {
-				return sqlbase.NewNonNullViolationError(cb.nonNullViolationColumnName)
+			// Evaluate the new values. This must be done separately for
+			// each row so as to handle impure functions correctly.
+			for j, e := range cb.updateExprs {
+				val, err := e.Eval(&cb.flowCtx.evalCtx)
+				if err != nil {
+					return sqlbase.NewInvalidSchemaDefinitionError(err)
+				}
+				if j < len(cb.added) && !cb.added[j].Nullable && val == parser.DNull {
+					return sqlbase.NewNonNullViolationError(cb.added[j].Name)
+				}
+				updateValues[j] = val
 			}
 			copy(oldValues, row)
 			// Update oldValues with NULL values where values weren't found;
@@ -235,12 +229,12 @@ func (cb *columnBackfiller) runChunk(
 					oldValues[j] = parser.DNull
 				}
 			}
-			if _, err := ru.UpdateRow(ctx, b, oldValues, cb.updateValues); err != nil {
+			if _, err := ru.UpdateRow(ctx, b, oldValues, updateValues); err != nil {
 				return err
 			}
 		}
 		// Write the new row values.
-		if err := txn.Run(ctx, b); err != nil {
+		if err := txn.CommitInBatch(ctx, b); err != nil {
 			return ConvertBackfillError(&cb.spec.Table, b)
 		}
 		return nil

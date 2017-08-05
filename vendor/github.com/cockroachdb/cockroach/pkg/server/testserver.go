@@ -151,6 +151,10 @@ func makeTestConfigFromParams(params base.TestServerArgs) Config {
 		cfg.HTTPAddr = params.HTTPAddr
 	}
 
+	if params.ListeningURLFile != "" {
+		cfg.ListeningURLFile = params.ListeningURLFile
+	}
+
 	// Ensure we have the correct number of engines. Add in-memory ones where
 	// needed. There must be at least one store/engine.
 	if len(params.StoreSpecs) == 0 {
@@ -360,6 +364,11 @@ func (ts *TestServer) Stores() *storage.Stores {
 	return ts.node.stores
 }
 
+// GetStores is part of TestServerInterface.
+func (ts *TestServer) GetStores() interface{} {
+	return ts.node.stores
+}
+
 // Engines returns the TestServer's engines.
 func (ts *TestServer) Engines() []engine.Engine {
 	return ts.engines
@@ -519,6 +528,11 @@ func (ts *TestServer) SplitRange(
 	// We use a transaction so that we get consistent results between the two
 	// scans (in case there are other splits happening).
 	var leftRangeDesc, rightRangeDesc roachpb.RangeDescriptor
+
+	// Errors returned from scanMeta cannot be wrapped or retryable errors won't
+	// be retried. Instead, the message to wrap is stored in case of
+	// non-retryable failures and then wrapped when the full transaction fails.
+	var wrappedMsg string
 	if err := ts.DB().Txn(ctx, func(ctx context.Context, txn *client.Txn) error {
 		scanMeta := func(key roachpb.RKey, reverse bool) (desc roachpb.RangeDescriptor, err error) {
 			var kvs []client.KeyValue
@@ -545,12 +559,14 @@ func (ts *TestServer) SplitRange(
 
 		rightRangeDesc, err = scanMeta(splitRKey, false /* !reverse */)
 		if err != nil {
-			return errors.Wrap(err, "could not look up right-hand side descriptor")
+			wrappedMsg = "could not look up right-hand side descriptor"
+			return err
 		}
 
 		leftRangeDesc, err = scanMeta(splitRKey, true /* reverse */)
 		if err != nil {
-			return errors.Wrap(err, "could not look up left-hand side descriptor")
+			wrappedMsg = "could not look up left-hand side descriptor"
+			return err
 		}
 
 		if !leftRangeDesc.EndKey.Equal(rightRangeDesc.StartKey) {
@@ -560,6 +576,9 @@ func (ts *TestServer) SplitRange(
 		}
 		return nil
 	}); err != nil {
+		if len(wrappedMsg) > 0 {
+			return roachpb.RangeDescriptor{}, roachpb.RangeDescriptor{}, errors.Wrap(err, wrappedMsg)
+		}
 		return roachpb.RangeDescriptor{}, roachpb.RangeDescriptor{}, err
 	}
 

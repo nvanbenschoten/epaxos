@@ -454,7 +454,7 @@ func MVCCGetProto(
 	txn *roachpb.Transaction,
 	msg proto.Message,
 ) (bool, error) {
-	// TODO(tschottdorf) Consider returning skipped intents to the caller.
+	// TODO(tschottdorf): Consider returning skipped intents to the caller.
 	value, _, mvccGetErr := MVCCGet(ctx, engine, key, timestamp, consistent, txn)
 	found := value != nil
 	// If we found a result, parse it regardless of the error returned by MVCCGet.
@@ -1079,7 +1079,7 @@ func mvccPutInternal(
 					(txn.Sequence == meta.Txn.Sequence && txn.BatchIndex <= meta.Txn.BatchIndex)) {
 				// Replay error if we encounter an older sequence number or
 				// the same (or earlier) batch index for the same sequence.
-				return roachpb.NewTransactionRetryError()
+				return roachpb.NewTransactionRetryError(roachpb.RETRY_POSSIBLE_REPLAY)
 			}
 			// Make sure we process valueFn before clearing any earlier
 			// version.  For example, a conditional put within same
@@ -2102,18 +2102,23 @@ func MVCCResolveWriteIntentRangeUsingIter(
 // MVCCGarbageCollect creates an iterator on the engine. In parallel
 // it iterates through the keys listed for garbage collection by the
 // keys slice. The engine iterator is seeked in turn to each listed
-// key, clearing all values with timestamps <= to expiration.
-// The timestamp parameter is used to compute the intent age on GC.
+// key, clearing all values with timestamps <= to expiration. The
+// timestamp parameter is used to compute the intent age on GC.
+// Garbage collection stops after clearing maxClears values
+// (to limit the size of the WriteBatch produced).
 func MVCCGarbageCollect(
 	ctx context.Context,
 	engine ReadWriter,
 	ms *enginepb.MVCCStats,
 	keys []roachpb.GCRequest_GCKey,
 	timestamp hlc.Timestamp,
+	maxClears int64,
 ) error {
 	iter := engine.NewIterator(false)
 	defer iter.Close()
+
 	// Iterate through specified GC keys.
+	var count int64
 	meta := &enginepb.MVCCMetadata{}
 	for _, gcKey := range keys {
 		encKey := MakeMVCCMetadataKey(gcKey.Key)
@@ -2151,6 +2156,10 @@ func MVCCGarbageCollect(
 				if err := engine.Clear(iter.UnsafeKey()); err != nil {
 					return err
 				}
+				count++
+				if count >= maxClears {
+					return nil
+				}
 			}
 		}
 
@@ -2181,6 +2190,10 @@ func MVCCGarbageCollect(
 				}
 				if err := engine.Clear(unsafeIterKey); err != nil {
 					return err
+				}
+				count++
+				if count >= maxClears {
+					return nil
 				}
 			}
 		}

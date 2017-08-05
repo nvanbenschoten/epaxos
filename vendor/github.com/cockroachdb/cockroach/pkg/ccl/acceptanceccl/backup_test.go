@@ -58,7 +58,7 @@ type benchmarkTest struct {
 func (bt *benchmarkTest) Start(ctx context.Context) {
 	bt.f = acceptance.MakeFarmer(bt.b, bt.prefix, acceptance.GetStopper())
 
-	bt.f.AddEnvVar("COCKROACH_MAX_OFFSET", "1s")
+	bt.f.AddFlag("--max-offset=1s")
 
 	if bt.cockroachDiskSizeGB != 0 {
 		bt.f.AddVars["cockroach_disk_size"] = strconv.Itoa(bt.cockroachDiskSizeGB)
@@ -189,8 +189,15 @@ func BenchmarkRestore2TB(b *testing.B) {
 	const backupBaseURI = "gs://cockroach-test/2t-backup"
 
 	bt := benchmarkTest{
-		b:                   b,
-		nodes:               10,
+		b: b,
+		// TODO(dan): This is intended to be a 10 node test, but gce local ssds
+		// are only available as 375GB, which doesn't fit a 2TB restore (at
+		// least until #15210 is fixed). We could have more than one ssd per
+		// machine and raid them together but in the lead up to 1.0, I'm trying
+		// to change as little as possible while getting this working. Azure has
+		// large storage machines available, but has other issues we're working
+		// through (#15381).
+		nodes:               15,
 		cockroachDiskSizeGB: 250,
 		prefix:              "restore2tb",
 	}

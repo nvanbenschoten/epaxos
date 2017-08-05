@@ -302,7 +302,7 @@ func (node *CollatedStringColType) Format(buf *bytes.Buffer, f FmtFlags) {
 		fmt.Fprintf(buf, "(%d)", node.N)
 	}
 	buf.WriteString(" COLLATE ")
-	buf.WriteString(node.Locale)
+	encodeSQLIdent(buf, node.Locale)
 }
 
 // ArrayColType represents an ARRAY column type.
@@ -433,6 +433,8 @@ func (node *OidColType) String() string            { return AsString(node) }
 // normalization.
 func DatumTypeToColumnType(t Type) (ColumnType, error) {
 	switch t {
+	case TypeBool:
+		return boolColTypeBool, nil
 	case TypeInt:
 		return intColTypeInt, nil
 	case TypeFloat:

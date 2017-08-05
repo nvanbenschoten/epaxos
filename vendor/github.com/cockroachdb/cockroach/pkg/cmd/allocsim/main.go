@@ -60,6 +60,7 @@ type Configuration struct {
 // Locality defines the properties of a single locality as part of a Configuration.
 type Locality struct {
 	Name              string `json:"Name"`
+	LocalityStr       string `json:"LocalityStr"`
 	NumNodes          int    `json:"NumNodes"`
 	NumWorkers        int    `json:"NumWorkers"`
 	OutgoingLatencies []*struct {
@@ -394,7 +395,6 @@ func handleStart() bool {
 	// for leases to settle onto other nodes even when requests are skewed heavily
 	// onto them.
 	storage.MinLeaseTransferStatsDuration = 10 * time.Second
-	storage.EnableLoadBasedLeaseRebalancing = true
 
 	cli.Main()
 	return true
@@ -452,7 +452,11 @@ func main() {
 		var nodeIdx int
 		for _, locality := range config.Localities {
 			for i := 0; i < locality.NumNodes; i++ {
-				perNodeArgs[nodeIdx] = []string{fmt.Sprintf("--locality=l=%s", locality.Name)}
+				if locality.LocalityStr != "" {
+					perNodeArgs[nodeIdx] = []string{fmt.Sprintf("--locality=%s", locality.LocalityStr)}
+				} else {
+					perNodeArgs[nodeIdx] = []string{fmt.Sprintf("--locality=l=%s", locality.Name)}
+				}
 				if separateAddrs {
 					perNodeEnv[nodeIdx] = []string{fmt.Sprintf("COCKROACH_SOURCE_IP_ADDRESS=%s", c.IPAddr(nodeIdx))}
 				}

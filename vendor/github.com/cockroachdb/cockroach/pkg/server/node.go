@@ -57,6 +57,9 @@ const (
 	// gossipStatusInterval is the interval for logging gossip status.
 	gossipStatusInterval = 1 * time.Minute
 	// gossipNodeDescriptorInterval is the interval for gossiping the node descriptor.
+	// Note that increasing this duration may increase the likelihood of gossip
+	// thrashing, since node descriptors are used to determine the number of gossip
+	// hops between nodes (see #9819 for context).
 	gossipNodeDescriptorInterval = 1 * time.Hour
 
 	// FirstNodeID is the node ID of the first node in a new cluster.
@@ -172,7 +175,7 @@ func incVal(ctx context.Context, db *client.DB, key roachpb.Key, inc int64) (int
 	for r := retry.Start(base.DefaultRetryOptions()); r.Next(); {
 		res, err = db.Inc(ctx, key, inc)
 		switch err.(type) {
-		case *roachpb.RetryableTxnError, *roachpb.AmbiguousResultError:
+		case *roachpb.UnhandledRetryableError, *roachpb.AmbiguousResultError:
 			continue
 		}
 		break
@@ -941,7 +944,8 @@ func (n *Node) setupSpanForIncomingRPC(
 				if err == nil {
 					br.CollectedSpans = append(br.CollectedSpans, encSp)
 				} else {
-					log.Warning(ctx, err)
+					// We can't log to the finished span; strip the span from the context.
+					log.Warning(opentracing.ContextWithSpan(ctx, nil), err)
 				}
 			}
 		}

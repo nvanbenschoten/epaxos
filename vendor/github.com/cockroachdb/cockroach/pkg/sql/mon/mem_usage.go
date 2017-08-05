@@ -342,7 +342,7 @@ func (mm *MemoryMonitor) Stop(ctx context.Context) {
 	mm.releaseBudget(ctx)
 
 	if mm.maxBytesHist != nil && mm.mu.maxAllocated > 0 {
-		// TODO(knz) We record the logarithm because the UI doesn't know
+		// TODO(knz): We record the logarithm because the UI doesn't know
 		// how to do logarithmic y-axes yet. See the explanatory comments
 		// in sql/mem_metrics.go.
 		val := int64(1000 * math.Log(float64(mm.mu.maxAllocated)) / math.Ln10)
@@ -457,6 +457,17 @@ func MakeStandaloneBudget(capacity int64) BoundAccount {
 // MakeBoundAccount greates a BoundAccount connected to the given monitor.
 func (mm *MemoryMonitor) MakeBoundAccount() BoundAccount {
 	return BoundAccount{mon: mm}
+}
+
+// Clear is an accessor for b.mon.ClearAccount.
+func (b *BoundAccount) Clear(ctx context.Context) {
+	if b.mon == nil {
+		// An account created by MakeStandaloneBudget is disconnected
+		// from any monitor -- "memory out of the aether". This needs not be
+		// closed.
+		return
+	}
+	b.mon.ClearAccount(ctx, &b.MemoryAccount)
 }
 
 // Close is an accessor for b.mon.CloseAccount.

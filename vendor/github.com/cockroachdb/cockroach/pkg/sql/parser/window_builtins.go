@@ -135,7 +135,7 @@ var windows = map[string][]Builtin{
 		collectBuiltins(func(t Type) Builtin {
 			return makeWindowBuiltin(ArgTypes{{"val", t}, {"n", TypeInt}}, t, makeLeadLagWindowConstructor(false, true, false))
 		}, TypesAnyNonArray...),
-		// TODO(nvanbenschoten) We still have no good way to represent two parameters that
+		// TODO(nvanbenschoten): We still have no good way to represent two parameters that
 		// can be any types but must be the same (eg. lag(T, Int, T)).
 		collectBuiltins(func(t Type) Builtin {
 			return makeWindowBuiltin(ArgTypes{{"val", t}, {"n", TypeInt}, {"default", t}},
@@ -230,7 +230,12 @@ func (w *aggregateWindowFunc) Compute(
 	}
 
 	// Retrieve the value for the entire peer group, save it, and return it.
-	w.peerRes = w.agg.Result()
+
+	peerRes, err := w.agg.Result()
+	if err != nil {
+		return nil, err
+	}
+	w.peerRes = peerRes
 	return w.peerRes, nil
 }
 

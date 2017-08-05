@@ -43,7 +43,7 @@ func TestReplicaGCQueueDropReplicaDirect(t *testing.T) {
 	// the queue does a consistent lookup which will usually be read from
 	// Node 1. Hence, if Node 1 hasn't processed the removal when Node 2 has,
 	// no GC will take place since the consistent RangeLookup hits the first
-	// Node. We use the TestingCommandFilter to make sure that the second Node
+	// Node. We use the TestingEvalFilter to make sure that the second Node
 	// waits for the first.
 	cfg := storage.TestStoreConfig(nil)
 	mtc.storeConfig = &cfg
@@ -78,7 +78,7 @@ func TestReplicaGCQueueDropReplicaDirect(t *testing.T) {
 
 	// Make sure the range is removed from the store.
 	testutils.SucceedsSoon(t, func() error {
-		if _, err := mtc.stores[1].GetReplica(rangeID); !testutils.IsError(err, "range .* was not found") {
+		if _, err := mtc.stores[1].GetReplica(rangeID); !testutils.IsError(err, "r[0-9]+ was not found") {
 			return errors.Errorf("expected range removal: %v", err) // NB: errors.Wrapf(nil, ...) returns nil.
 		}
 		return nil
@@ -118,7 +118,7 @@ func TestReplicaGCQueueDropReplicaGCOnScan(t *testing.T) {
 	testutils.SucceedsSoon(t, func() error {
 		store := mtc.stores[1]
 		store.ForceReplicaGCScanAndProcess()
-		if _, err := store.GetReplica(rangeID); !testutils.IsError(err, "range .* was not found") {
+		if _, err := store.GetReplica(rangeID); !testutils.IsError(err, "r[0-9]+ was not found") {
 			return errors.Errorf("expected range removal: %v", err) // NB: errors.Wrapf(nil, ...) returns nil.
 		}
 		return nil

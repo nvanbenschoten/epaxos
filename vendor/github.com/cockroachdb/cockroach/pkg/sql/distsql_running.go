@@ -26,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/distsqlrun"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
@@ -97,7 +98,11 @@ func (dsp *distSQLPlanner) initRunners() {
 // Note that errors that happen while actually running the flow are reported to
 // recv, not returned by this function.
 func (dsp *distSQLPlanner) Run(
-	planCtx *planningCtx, txn *client.Txn, plan *physicalPlan, recv *distSQLReceiver,
+	planCtx *planningCtx,
+	txn *client.Txn,
+	plan *physicalPlan,
+	recv *distSQLReceiver,
+	evalCtx parser.EvalContext,
 ) error {
 	ctx := planCtx.ctx
 
@@ -119,6 +124,17 @@ func (dsp *distSQLPlanner) Run(
 	recv.resultToStreamColMap = plan.planToStreamColMap
 	thisNodeID := dsp.nodeDesc.NodeID
 
+	// DistSQL needs to initialize the Transaction proto before we put it in the
+	// FlowRequest's below. This is because we might not have used the txn do to
+	// anything else (we might not have sent any requests through the client.Txn,
+	// which normally does this init).
+	txn.EnsureProto()
+
+	evalCtxProto := distsqlrun.MakeEvalContext(evalCtx)
+	for _, s := range evalCtx.SearchPath {
+		evalCtxProto.SearchPath = append(evalCtxProto.SearchPath, s)
+	}
+
 	// Start all the flows except the flow on this node (there is always a flow on
 	// this node).
 	var resultChan chan runnerResult
@@ -131,9 +147,10 @@ func (dsp *distSQLPlanner) Run(
 			continue
 		}
 		req := &distsqlrun.SetupFlowRequest{
-			Version: distsqlrun.Version,
-			Txn:     *txn.Proto(),
-			Flow:    flowSpec,
+			Version:     distsqlrun.Version,
+			Txn:         *txn.Proto(),
+			Flow:        flowSpec,
+			EvalContext: evalCtxProto,
 		}
 		if err := distsqlrun.SetFlowRequestTrace(ctx, req); err != nil {
 			return err
@@ -172,9 +189,10 @@ func (dsp *distSQLPlanner) Run(
 
 	// Set up the flow on this node.
 	localReq := distsqlrun.SetupFlowRequest{
-		Version: distsqlrun.Version,
-		Txn:     *txn.Proto(),
-		Flow:    flows[thisNodeID],
+		Version:     distsqlrun.Version,
+		Txn:         *txn.Proto(),
+		Flow:        flows[thisNodeID],
+		EvalContext: evalCtxProto,
 	}
 	if err := distsqlrun.SetFlowRequestTrace(ctx, &localReq); err != nil {
 		return err
@@ -202,7 +220,7 @@ type distSQLReceiver struct {
 
 	// rows is the container where we store the results; if we only need the count
 	// of the rows, it is nil.
-	rows *RowContainer
+	rows *sqlbase.RowContainer
 	// resultToStreamColMap maps result columns to columns in the distsqlrun results
 	// stream.
 	resultToStreamColMap []int
@@ -223,22 +241,44 @@ type distSQLReceiver struct {
 
 	rangeCache *kv.RangeDescriptorCache
 	leaseCache *kv.LeaseHolderCache
+
+	// The transaction in which the flow producing data for this receiver runs.
+	// The distSQLReceiver updates the TransactionProto in response to
+	// RetryableTxnError's. Nil if no transaction should be updated on errors
+	// (i.e. if the flow overall doesn't run in a transaction).
+	txn *client.Txn
+
+	// A handler for clock signals arriving from remote nodes. This should update
+	// this node's clock.
+	updateClock func(observedTs hlc.Timestamp)
 }
 
 var _ distsqlrun.RowReceiver = &distSQLReceiver{}
 
+// makeDistSQLReceiver creates a distSQLReceiver.
+//
+// ctx is the Context that the receiver will use throughput its lifetime.
+// sink is the container where the results will be stored. If only the row count
+// is needed, this can be nil.
+//
+// txn is the transaction in which the producer flow runs; it will be updated
+// on errors. Nil if the flow overall doesn't run in a transaction.
 func makeDistSQLReceiver(
 	ctx context.Context,
-	sink *RowContainer,
+	sink *sqlbase.RowContainer,
 	rangeCache *kv.RangeDescriptorCache,
 	leaseCache *kv.LeaseHolderCache,
-) distSQLReceiver {
+	txn *client.Txn,
+	updateClock func(observedTs hlc.Timestamp),
+) (distSQLReceiver, error) {
 	return distSQLReceiver{
-		ctx:        ctx,
-		rows:       sink,
-		rangeCache: rangeCache,
-		leaseCache: leaseCache,
-	}
+		ctx:         ctx,
+		rows:        sink,
+		rangeCache:  rangeCache,
+		leaseCache:  leaseCache,
+		txn:         txn,
+		updateClock: updateClock,
+	}, nil
 }
 
 // Push is part of the RowReceiver interface.
@@ -247,10 +287,30 @@ func (r *distSQLReceiver) Push(
 ) distsqlrun.ConsumerStatus {
 	if !meta.Empty() {
 		if meta.Err != nil && r.err == nil {
+			if r.txn != nil {
+				if retryErr, ok := meta.Err.(*roachpb.UnhandledRetryableError); ok {
+					// Update the txn in response to remote errors. In the non-DistSQL
+					// world, the TxnCoordSender does this, and the client.Txn updates
+					// itself in non-error cases. Those updates are not necessary if we're
+					// just doing reads. Once DistSQL starts performing writes, we'll need
+					// to perform such updates too.
+					r.txn.UpdateStateOnRemoteRetryableErr(r.ctx, retryErr.PErr)
+					// Update the clock with information from the error. On non-DistSQL
+					// code paths, the DistSender does this.
+					// TODO(andrei): We don't propagate clock signals on success cases
+					// through DistSQL; we should. We also don't propagate them through
+					// non-retryable errors; we also should.
+					r.updateClock(retryErr.PErr.Now)
+					meta.Err = roachpb.NewHandledRetryableTxnError(
+						meta.Err.Error(), r.txn.Proto().ID, *r.txn.Proto())
+				}
+			}
 			r.err = meta.Err
 		}
 		if len(meta.Ranges) > 0 {
-			r.err = r.updateCaches(r.ctx, meta.Ranges)
+			if err := r.updateCaches(r.ctx, meta.Ranges); err != nil && r.err == nil {
+				r.err = err
+			}
 		}
 		return r.status
 	}
@@ -329,7 +389,11 @@ func (r *distSQLReceiver) updateCaches(ctx context.Context, ranges []roachpb.Ran
 // Note that errors that happen while actually running the flow are reported to
 // recv, not returned by this function.
 func (dsp *distSQLPlanner) PlanAndRun(
-	ctx context.Context, txn *client.Txn, tree planNode, recv *distSQLReceiver,
+	ctx context.Context,
+	txn *client.Txn,
+	tree planNode,
+	recv *distSQLReceiver,
+	evalCtx parser.EvalContext,
 ) error {
 	planCtx := dsp.NewPlanningCtx(ctx, txn)
 
@@ -340,5 +404,5 @@ func (dsp *distSQLPlanner) PlanAndRun(
 		return err
 	}
 	dsp.FinalizePlan(&planCtx, &plan)
-	return dsp.Run(&planCtx, txn, &plan, recv)
+	return dsp.Run(&planCtx, txn, &plan, recv, evalCtx)
 }

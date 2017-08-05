@@ -22,6 +22,7 @@ import (
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 )
 
@@ -117,11 +118,13 @@ var varGen = map[string]sessionVar{
 			}
 			switch parser.Name(s).Normalize() {
 			case parser.ReNormalizeName("off"):
-				p.session.DistSQLMode = distSQLOff
+				p.session.DistSQLMode = DistSQLOff
 			case parser.ReNormalizeName("on"):
-				p.session.DistSQLMode = distSQLOn
+				p.session.DistSQLMode = DistSQLOn
+			case parser.ReNormalizeName("auto"):
+				p.session.DistSQLMode = DistSQLAuto
 			case parser.ReNormalizeName("always"):
-				p.session.DistSQLMode = distSQLAlways
+				p.session.DistSQLMode = DistSQLAlways
 			default:
 				return fmt.Errorf("set distsql: \"%s\" not supported", s)
 			}
@@ -129,19 +132,13 @@ var varGen = map[string]sessionVar{
 			return nil
 		},
 		Get: func(p *planner) string {
-			switch p.session.DistSQLMode {
-			case distSQLOff:
-				return "off"
-			case distSQLOn:
-				return "on"
-			case distSQLAlways:
-				return "always"
-			}
-
-			return "auto"
+			return p.session.DistSQLMode.String()
 		},
 		Reset: func(p *planner) error {
-			p.session.DistSQLMode = defaultDistSQLMode
+			p.session.DistSQLMode = DistSQLExecModeFromInt(DistSQLClusterExecMode.Get())
+			if p.session.execCfg.TestingKnobs.OverrideDistSQLMode != nil {
+				p.session.DistSQLMode = DistSQLExecModeFromInt(p.session.execCfg.TestingKnobs.OverrideDistSQLMode.Get())
+			}
 			return nil
 		},
 	},
@@ -178,7 +175,7 @@ var varGen = map[string]sessionVar{
 		},
 		Get: func(p *planner) string { return strings.Join(p.session.SearchPath, ", ") },
 		Reset: func(p *planner) error {
-			p.session.SearchPath = parser.SearchPath{"pg_catalog"}
+			p.session.SearchPath = sqlbase.DefaultSearchPath
 			return nil
 		},
 	},
@@ -218,12 +215,37 @@ var varGen = map[string]sessionVar{
 			return nil
 		},
 	},
-	`time zone`:                   {Get: func(p *planner) string { return p.session.Location.String() }},
-	`transaction isolation level`: {Get: func(p *planner) string { return p.txn.Isolation().String() }},
-	`transaction priority`:        {Get: func(p *planner) string { return p.txn.UserPriority().String() }},
-	`max_index_keys`:              {Get: func(*planner) string { return "32" }},
-	`server_version`:              {Get: func(*planner) string { return PgServerVersion }},
-	`session_user`:                {Get: func(p *planner) string { return p.session.User }},
+	`time zone`: {
+		Get: func(p *planner) string {
+			// If the time zone is a "fixed offset" one, initialized from an offset
+			// and not a standard name, then we use a magic format in the Location's
+			// name. We attempt to parse that here and retrieve the original offset
+			// specified by the user.
+			_, origRepr, parsed := sqlbase.ParseFixedOffsetTimeZone(p.session.Location.String())
+			if parsed {
+				return origRepr
+			}
+			return p.session.Location.String()
+		},
+	},
+	`transaction isolation level`: {
+		Get: func(p *planner) string { return p.txn.Isolation().String() },
+	},
+	`transaction priority`: {
+		Get: func(p *planner) string { return p.txn.UserPriority().String() },
+	},
+	`transaction status`: {
+		Get: func(p *planner) string { return getTransactionState(&p.session.TxnState, p.autoCommit) },
+	},
+	`max_index_keys`: {
+		Get: func(*planner) string { return "32" },
+	},
+	`server_version`: {
+		Get: func(*planner) string { return PgServerVersion },
+	},
+	`session_user`: {
+		Get: func(p *planner) string { return p.session.User },
+	},
 
 	// See https://www.postgresql.org/docs/9.6/static/runtime-config-client.html
 	`extra_float_digits`: nopVar,
@@ -242,7 +264,8 @@ var varGen = map[string]sessionVar{
 			if err != nil {
 				return err
 			}
-			if strings.ToUpper(s) != "UTF8" {
+			upper := strings.ToUpper(s)
+			if upper != "UTF8" && upper != "UNICODE" {
 				return fmt.Errorf("non-UTF8 encoding %s not supported", s)
 			}
 			return nil

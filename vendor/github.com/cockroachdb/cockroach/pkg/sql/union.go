@@ -29,7 +29,7 @@ import (
 
 // UnionClause constructs a planNode from a UNION/INTERSECT/EXCEPT expression.
 func (p *planner) UnionClause(
-	ctx context.Context, n *parser.UnionClause, desiredTypes []parser.Type, autoCommit bool,
+	ctx context.Context, n *parser.UnionClause, desiredTypes []parser.Type,
 ) (planNode, error) {
 	var emitAll = false
 	var emit unionNodeEmit
@@ -56,11 +56,11 @@ func (p *planner) UnionClause(
 		return nil, errors.Errorf("%v is not supported", n.Type)
 	}
 
-	left, err := p.newPlan(ctx, n.Left, desiredTypes, autoCommit)
+	left, err := p.newPlan(ctx, n.Left, desiredTypes)
 	if err != nil {
 		return nil, err
 	}
-	right, err := p.newPlan(ctx, n.Right, desiredTypes, autoCommit)
+	right, err := p.newPlan(ctx, n.Right, desiredTypes)
 	if err != nil {
 		return nil, err
 	}
@@ -79,19 +79,17 @@ func (p *planner) UnionClause(
 		if !l.Typ.Equivalent(r.Typ) {
 			return nil, fmt.Errorf("%v types %s and %s cannot be matched", n.Type, l.Typ, r.Typ)
 		}
-		if l.hidden != r.hidden {
+		if l.Hidden != r.Hidden {
 			return nil, fmt.Errorf("%v types cannot be matched", n.Type)
 		}
 	}
 
 	node := &unionNode{
-		right:     right,
-		left:      left,
-		rightDone: false,
-		leftDone:  false,
-		emitAll:   emitAll,
-		emit:      emit,
-		scratch:   make([]byte, 0),
+		right:   right,
+		left:    left,
+		emitAll: emitAll,
+		emit:    emit,
+		scratch: make([]byte, 0),
 	}
 	return node, nil
 }
@@ -132,8 +130,6 @@ func (p *planner) UnionClause(
 //    already emitted as many as were on the right, don't emit.
 type unionNode struct {
 	right, left planNode
-	rightDone   bool
-	leftDone    bool
 	emitAll     bool // emitAll is a performance optimization for UNION ALL.
 	emit        unionNodeEmit
 	scratch     []byte
@@ -141,8 +137,8 @@ type unionNode struct {
 	debugVals   debugValues
 }
 
-func (n *unionNode) Columns() ResultColumns { return n.left.Columns() }
-func (n *unionNode) Ordering() orderingInfo { return orderingInfo{} }
+func (n *unionNode) Columns() sqlbase.ResultColumns { return n.left.Columns() }
+func (n *unionNode) Ordering() orderingInfo         { return orderingInfo{} }
 
 func (n *unionNode) Spans(ctx context.Context) (reads, writes roachpb.Spans, err error) {
 	leftReads, leftWrites, err := n.left.Spans(ctx)
@@ -157,14 +153,13 @@ func (n *unionNode) Spans(ctx context.Context) (reads, writes roachpb.Spans, err
 }
 
 func (n *unionNode) Values() parser.Datums {
-	switch {
-	case !n.rightDone:
+	if n.right != nil {
 		return n.right.Values()
-	case !n.leftDone:
-		return n.left.Values()
-	default:
-		return nil
 	}
+	if n.left != nil {
+		return n.left.Values()
+	}
+	return nil
 }
 
 func (n *unionNode) MarkDebug(mode explainMode) {
@@ -214,8 +209,8 @@ func (n *unionNode) readRight(ctx context.Context) (bool, error) {
 		return false, err
 	}
 
-	n.rightDone = true
 	n.right.Close(ctx)
+	n.right = nil
 	return n.readLeft(ctx)
 }
 
@@ -249,8 +244,8 @@ func (n *unionNode) readLeft(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	n.leftDone = true
 	n.left.Close(ctx)
+	n.left = nil
 	return false, nil
 }
 
@@ -262,22 +257,23 @@ func (n *unionNode) Start(ctx context.Context) error {
 }
 
 func (n *unionNode) Next(ctx context.Context) (bool, error) {
-	switch {
-	case !n.rightDone:
+	if n.right != nil {
 		return n.readRight(ctx)
-	case !n.leftDone:
-		return n.readLeft(ctx)
-	default:
-		return false, nil
 	}
+	if n.left != nil {
+		return n.readLeft(ctx)
+	}
+	return false, nil
 }
 
 func (n *unionNode) Close(ctx context.Context) {
-	switch {
-	case !n.rightDone:
+	if n.right != nil {
 		n.right.Close(ctx)
-	case !n.leftDone:
+		n.right = nil
+	}
+	if n.left != nil {
 		n.left.Close(ctx)
+		n.left = nil
 	}
 }
 

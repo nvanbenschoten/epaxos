@@ -12,16 +12,21 @@
 // implied. See the License for the specific language governing
 // permissions and limitations under the License. See the AUTHORS file
 // for names of contributors.
-//
-// Author: Tamir Duberstein (tamird@gmail.com)
 
 package grpcutil
 
 import (
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/petermattis/goid"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc/grpclog"
 
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 func init() {
@@ -56,10 +61,56 @@ func (*logger) Print(args ...interface{}) {
 	log.InfofDepth(context.TODO(), 2, "", args...)
 }
 
+// https://github.com/grpc/grpc-go/blob/955c867/clientconn.go#L836
+var (
+	transportFailedRe   = regexp.MustCompile("^" + regexp.QuoteMeta("grpc: addrConn.resetTransport failed to create client transport:"))
+	connectionRefusedRe = regexp.MustCompile(
+		strings.Join([]string{
+			// *nix
+			regexp.QuoteMeta("connection refused"),
+			// Windows
+			regexp.QuoteMeta("No connection could be made because the target machine actively refused it"),
+		}, "|"),
+	)
+)
+
 func (*logger) Printf(format string, args ...interface{}) {
-	log.InfofDepth(context.TODO(), 2, format, args...)
+	if shouldPrint(transportFailedRe, connectionRefusedRe, time.Minute, format, args...) {
+		log.InfofDepth(context.TODO(), 2, format, args...)
+	}
 }
 
 func (*logger) Println(args ...interface{}) {
 	log.InfofDepth(context.TODO(), 2, "", args...)
+}
+
+var spamMu = struct {
+	syncutil.Mutex
+	gids map[int64]time.Time
+}{
+	gids: make(map[int64]time.Time),
+}
+
+func shouldPrint(
+	formatRe, argsRe *regexp.Regexp, freq time.Duration, format string, args ...interface{},
+) bool {
+	if formatRe.MatchString(format) {
+		for _, arg := range args {
+			if err, ok := arg.(error); ok {
+				if argsRe.MatchString(err.Error()) {
+					gid := goid.Get()
+					now := timeutil.Now()
+					spamMu.Lock()
+					t, ok := spamMu.gids[gid]
+					doPrint := !(ok && now.Sub(t) < freq)
+					if doPrint {
+						spamMu.gids[gid] = now
+					}
+					spamMu.Unlock()
+					return doPrint
+				}
+			}
+		}
+	}
+	return true
 }

@@ -128,16 +128,8 @@ func (v *distSQLExprCheckVisitor) VisitPre(expr parser.Expr) (recurse bool, newE
 		return false, expr
 
 	case *parser.FuncExpr:
-		if t.IsContextDependent() {
-			v.err = errors.Errorf("context-dependent function %s not supported", t)
-			return false, expr
-		}
-
-	case *parser.CastExpr:
-		switch t.Type.(type) {
-		case *parser.DateColType, *parser.TimestampTZColType:
-			// Casting to a Date or TimestampTZ involves the current timezone.
-			v.err = errors.Errorf("context-dependent cast to %s not supported", t.Type)
+		if t.IsDistSQLBlacklist() {
+			v.err = errors.Errorf("function %s cannot be executed with distsql", t)
 			return false, expr
 		}
 	}
@@ -332,6 +324,7 @@ type planningCtx struct {
 	spanIter distsqlplan.SpanResolverIterator
 	// nodeAddresses contains addresses for all NodeIDs that are referenced by any
 	// physicalPlan we generate with this context.
+	// Nodes that fail a health check have empty addresses.
 	nodeAddresses map[roachpb.NodeID]string
 }
 
@@ -390,8 +383,8 @@ func (dsp *distSQLPlanner) partitionSpans(
 		panic("no spans")
 	}
 	ctx := planCtx.ctx
-	splits := make([]spanPartition, 0, 1)
-	// nodeMap maps a nodeID to an index inside the splits array.
+	partitions := make([]spanPartition, 0, 1)
+	// nodeMap maps a nodeID to an index inside the partitions array.
 	nodeMap := make(map[roachpb.NodeID]int)
 	it := planCtx.spanIter
 	for _, span := range spans {
@@ -407,6 +400,9 @@ func (dsp *distSQLPlanner) partitionSpans(
 		var lastNodeID roachpb.NodeID
 		// lastKey maintains the EndKey of the last piece of `span`.
 		lastKey := rspan.Key
+		if log.V(1) {
+			log.Infof(ctx, "partitioning span %s", span)
+		}
 		for it.Seek(ctx, span, kv.Ascending); ; it.Next(ctx) {
 			if !it.Valid() {
 				return nil, it.Error()
@@ -416,10 +412,16 @@ func (dsp *distSQLPlanner) partitionSpans(
 				return nil, err
 			}
 			desc := it.Desc()
+			if log.V(1) {
+				log.Infof(ctx, "lastKey: %s desc: %s", lastKey, desc)
+			}
 
 			if !desc.ContainsKey(lastKey) {
 				// This range must contain the last range's EndKey.
-				log.Fatalf(ctx, "next range doesn't cover last end key: %#v %v", splits, desc.RSpan())
+				log.Fatalf(
+					ctx, "next range %v doesn't cover last end key %v. Partitions: %#v",
+					desc.RSpan(), lastKey, partitions,
+				)
 			}
 
 			// Limit the end key to the end of the span we are resolving.
@@ -429,22 +431,42 @@ func (dsp *distSQLPlanner) partitionSpans(
 			}
 
 			nodeID := replInfo.NodeDesc.NodeID
-			idx, ok := nodeMap[nodeID]
-			if !ok {
-				idx = len(splits)
-				splits = append(splits, spanPartition{node: nodeID})
-				nodeMap[nodeID] = idx
-				if _, ok := planCtx.nodeAddresses[nodeID]; !ok {
-					planCtx.nodeAddresses[nodeID] = replInfo.NodeDesc.Address.String()
+			partitionIdx, inNodeMap := nodeMap[nodeID]
+			if !inNodeMap {
+				// This is the first time we are seeing nodeID for these spans. Check
+				// its health.
+				addr, inAddrMap := planCtx.nodeAddresses[nodeID]
+				if !inAddrMap {
+					addr = replInfo.NodeDesc.Address.String()
+					err := dsp.rpcContext.ConnHealth(addr)
+					if err != nil && err != rpc.ErrNotConnected && err != rpc.ErrNotHeartbeated {
+						// This host is known to be unhealthy. Don't use it (use the gateway
+						// instead). Note: this can never happen for our nodeID (which
+						// always has its address in the nodeMap).
+						addr = ""
+						log.VEventf(ctx, 1, "marking node %d as unhealthy for this plan: %v", nodeID, err)
+					}
+					planCtx.nodeAddresses[nodeID] = addr
+				}
+				if addr == "" {
+					// An empty address indicates an unhealthy host. Use the gateway to
+					// process this span instead of the unhealthy host.
+					nodeID = dsp.nodeDesc.NodeID
+					partitionIdx, inNodeMap = nodeMap[nodeID]
+				}
+				if !inNodeMap {
+					partitionIdx = len(partitions)
+					partitions = append(partitions, spanPartition{node: nodeID})
+					nodeMap[nodeID] = partitionIdx
 				}
 			}
-			split := &splits[idx]
+			partition := &partitions[partitionIdx]
 
 			if lastNodeID == nodeID {
 				// Two consecutive ranges on the same node, merge the spans.
-				split.spans[len(split.spans)-1].EndKey = endKey.AsRawKey()
+				partition.spans[len(partition.spans)-1].EndKey = endKey.AsRawKey()
 			} else {
-				split.spans = append(split.spans, roachpb.Span{
+				partition.spans = append(partition.spans, roachpb.Span{
 					Key:    lastKey.AsRawKey(),
 					EndKey: endKey.AsRawKey(),
 				})
@@ -459,7 +481,7 @@ func (dsp *distSQLPlanner) partitionSpans(
 			lastNodeID = nodeID
 		}
 	}
-	return splits, nil
+	return partitions, nil
 }
 
 // initTableReaderSpec initializes a TableReaderSpec/PostProcessSpec that
@@ -546,7 +568,7 @@ func (dsp *distSQLPlanner) convertOrdering(
 
 // createTableReaders generates a plan consisting of table reader processors,
 // one for each node that has spans that we are reading.
-// overrideResultColumns is optional.
+// overridesResultColumns is optional.
 func (dsp *distSQLPlanner) createTableReaders(
 	planCtx *planningCtx, n *scanNode, overrideResultColumns []uint32,
 ) (physicalPlan, error) {
@@ -582,29 +604,35 @@ func (dsp *distSQLPlanner) createTableReaders(
 		p.ResultRouters = append(p.ResultRouters, pIdx)
 	}
 
-	if overrideResultColumns != nil {
-		post.OutputColumns = overrideResultColumns
-	} else {
-		post.OutputColumns = getOutputColumnsFromScanNode(n)
+	planToStreamColMap := make([]int, len(n.resultColumns))
+	for i := range planToStreamColMap {
+		planToStreamColMap[i] = i
 	}
 
-	planToStreamColMap := makePlanToStreamColMap(len(n.resultColumns))
-	for i, col := range post.OutputColumns {
-		planToStreamColMap[col] = i
-	}
 	if len(p.ResultRouters) > 1 && len(n.ordering.ordering) > 0 {
-		// We have to maintain a certain ordering between the parallel streams. This
-		// might mean we need to add output columns.
-		for _, col := range n.ordering.ordering {
-			if planToStreamColMap[col.ColIdx] == -1 {
-				// This column is not part of the output; add it.
-				planToStreamColMap[col.ColIdx] = len(post.OutputColumns)
-				post.OutputColumns = append(post.OutputColumns, uint32(col.ColIdx))
-			}
-		}
+		// Make a note of the fact that we have to maintain a certain ordering
+		// between the parallel streams.
+		//
+		// This information is taken into account by the AddProjection call below:
+		// specifically, it will make sure these columns are kept even if they are
+		// not in the projection (e.g. "SELECT v FROM kv ORDER BY k").
 		p.SetMergeOrdering(dsp.convertOrdering(n.ordering.ordering, planToStreamColMap))
 	}
 	p.SetLastStagePost(post, getTypesForPlanResult(n, planToStreamColMap))
+
+	outCols := overrideResultColumns
+	if outCols == nil {
+		outCols = getOutputColumnsFromScanNode(n)
+	}
+	p.AddProjection(outCols)
+
+	post = p.GetLastStagePost()
+	for i := range planToStreamColMap {
+		planToStreamColMap[i] = -1
+	}
+	for i, col := range post.OutputColumns {
+		planToStreamColMap[col] = i
+	}
 	p.planToStreamColMap = planToStreamColMap
 	return p, nil
 }
@@ -1105,6 +1133,7 @@ ColLoop:
 
 	post := distsqlrun.PostProcessSpec{
 		Filter:        distsqlplan.MakeExpression(n.table.filter, nil),
+		Projection:    true,
 		OutputColumns: getOutputColumnsFromScanNode(n.table),
 	}
 
@@ -1254,11 +1283,21 @@ func (dsp *distSQLPlanner) createPlanForJoin(
 		}
 	} else {
 		// Without column equality, we cannot distribute the join. Run a
-		// single processor on this node.
+		// single processor.
 		nodes = []roachpb.NodeID{dsp.nodeDesc.NodeID}
+
+		// If either side has a single stream, put the processor on that node. We
+		// prefer the left side because that is processed first by the hash joiner.
+		if len(leftRouters) == 1 {
+			nodes[0] = p.Processors[leftRouters[0]].Node
+		} else if len(rightRouters) == 1 {
+			nodes[0] = p.Processors[rightRouters[0]].Node
+		}
 	}
 
-	var post distsqlrun.PostProcessSpec
+	post := distsqlrun.PostProcessSpec{
+		Projection: true,
+	}
 	// addOutCol appends to post.OutputColumns and returns the index
 	// in the slice of the added column.
 	addOutCol := func(col uint32) int {
@@ -1273,7 +1312,7 @@ func (dsp *distSQLPlanner) createPlanForJoin(
 	//  - the columns on the right side (numRightCols)
 	joinCol := 0
 	for i := 0; i < n.pred.numMergedEqualityColumns; i++ {
-		if !n.columns[joinCol].omitted {
+		if !n.columns[joinCol].Omitted {
 			// TODO(radu): for full outer joins, this will be more tricky: we would
 			// need an output column that outputs either the left or the right
 			// equality column, whichever is not NULL.
@@ -1282,13 +1321,13 @@ func (dsp *distSQLPlanner) createPlanForJoin(
 		joinCol++
 	}
 	for i := 0; i < n.pred.numLeftCols; i++ {
-		if !n.columns[joinCol].omitted {
+		if !n.columns[joinCol].Omitted {
 			joinToStreamColMap[joinCol] = addOutCol(uint32(leftPlan.planToStreamColMap[i]))
 		}
 		joinCol++
 	}
 	for i := 0; i < n.pred.numRightCols; i++ {
-		if !n.columns[joinCol].omitted {
+		if !n.columns[joinCol].Omitted {
 			joinToStreamColMap[joinCol] = addOutCol(
 				uint32(rightPlan.planToStreamColMap[i] + len(leftTypes)),
 			)

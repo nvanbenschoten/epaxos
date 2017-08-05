@@ -17,10 +17,25 @@ import:
 - package: google.golang.org/grpc
   version: ded79a3531af2dd320eed5b2fd138f23fb2e3f59
   repo: https://github.com/andreimatei/grpc-go
+# https://github.com/lightstep/lightstep-tracer-go/pull/73 removed support for
+# basictracer.Delegator. Revisit when
+# https://github.com/cockroachdb/cockroach/issues/9806 is fixed.
+- package: github.com/lightstep/lightstep-tracer-go
+  version: 45076de666938f451972e097cc450db32882dfec
 # We pin glide itself to prevent changes to glide's dependency resolution
 # algorithm from modifying our dependencies unexpectedly.
 - package: github.com/Masterminds/glide
   version: 869001d1571ce5f03fd0078bff188b9d3f272807
+
+# https://github.com/cockroachdb/raven-go/pulls/1 avoids banned go/build import.
+- package: github.com/getsentry/raven-go
+  version: aa4f14680cc759ef40791558d93c90c6f629c10f
+  repo: https://github.com/cockroachdb/raven-go
+
+# The collation tables must never change.
+- package: golang.org/x/text
+  version: 470f45bf29f4147d6fbd7dfd0a02a848e49f5bf4
+
 # Pins to prevent unintended version changes to libs we care about when adding/
 # removing/changing other deps. These are grouped separately to make it easier
 # to comment them out in bulk when running an across-the-board dep update.
@@ -53,4 +68,4 @@ import:
 - package: golang.org/x/net
   version: a6577fac2d73be281a500b310739095313165611
 - package: golang.org/x/sys
-  version: f3918c30c5c2cb527c0b071a27c35120a6c0719a
+  version: 1e4778a9a153163315e71a39674fbe87fe8f30a5

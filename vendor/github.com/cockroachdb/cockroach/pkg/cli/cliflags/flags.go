@@ -56,8 +56,10 @@ specialized hardware or number of cores (e.g. "gpu", "x16c"). For example:
 An ordered, comma-separated list of key-value pairs that describe the topography
 of the machine. Topography might include country, datacenter or rack
 designations. Data is automatically replicated to maximize diversities of each
-tier. The order of tiers is used to determine the priority of the diversity. The
-tiers and order must be the same on all nodes.  For example:
+tier. The order of tiers is used to determine the priority of the diversity, so
+the more inclusive localities like country should come before less inclusive
+localities like datacenter. The tiers and order must be the same on all nodes.
+Including more tiers is better than including fewer. For example:
 <PRE>
 
   --locality=country=us,region=us-west,datacenter=us-west-1b,rack=12
@@ -219,6 +221,13 @@ communication; it must resolve from other nodes in the cluster.`,
 		Description: `The port to bind to for HTTP requests.`,
 	}
 
+	ListeningURLFile = FlagInfo{
+		Name: "listening-url-file",
+		Description: `
+After the CockroachDB node has started up successfully, it will
+write its connection URL to the specified file.`,
+	}
+
 	PIDFile = FlagInfo{
 		Name: "pid-file",
 		Description: `
@@ -246,8 +255,11 @@ production usage.`,
 	ServerInsecure = FlagInfo{
 		Name: "insecure",
 		Description: `
-Start an insecure node, using unencrypted (non-TLS) connections. This is strongly discouraged for
-production usage.`,
+Start an insecure node, using unencrypted (non-TLS) connections,
+listening on all IP addresses (unless --host is provided) and
+disabling password authentication for all database users. This is
+strongly discouraged for production usage and should never be used on
+a public network without combining it with --host.`,
 	}
 
 	// KeySize, CertificateLifetime, AllowKeyReuse, and OverwriteFiles are used for
@@ -313,6 +325,21 @@ disabled by setting the environment variable COCKROACH_SKIP_KEY_PERMISSION_CHECK
 		Name:        "ca-key",
 		EnvVar:      "COCKROACH_CA_KEY",
 		Description: `Path to the CA key.`,
+	}
+
+	MaxOffset = FlagInfo{
+		Name: "max-offset",
+		Description: `
+Maximum allowed clock offset for the cluster. If observed clock offsets exceed
+this limit, servers will crash to minimize the likelihood of reading
+inconsistent data. Increasing this value will increase the time to recovery of
+failures as well as the frequency of uncertainty-based read restarts.
+<PRE>
+
+</PRE>
+Note that this value must be the same on all nodes in the cluster. In order to
+change it, every node in the cluster must be stopped and restarted with the new
+value.`,
 	}
 
 	Store = FlagInfo{
@@ -417,13 +444,6 @@ is the prefix for range local keys.`}
 	Sizes = FlagInfo{
 		Name:        "sizes",
 		Description: `Print key and value sizes along with their associated key.`,
-	}
-
-	RaftTickInterval = FlagInfo{
-		Name: "raft-tick-interval",
-		Description: `
-The resolution of the Raft timer; other raft timeouts are
-defined in terms of multiples of this value.`,
 	}
 
 	Replicated = FlagInfo{

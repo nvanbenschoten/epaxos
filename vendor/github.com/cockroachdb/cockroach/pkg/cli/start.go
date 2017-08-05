@@ -81,7 +81,7 @@ uninitialized, specify the --join flag to point to any healthy node
 }
 
 func setDefaultSizeParameters(ctx *server.Config) {
-	if size, err := server.GetTotalMemory(); err == nil {
+	if size, err := server.GetTotalMemory(context.Background()); err == nil {
 		// Default the cache size to 1/4 of total memory. A larger cache size
 		// doesn't necessarily improve performance as this is memory that is
 		// dedicated to uncompressed blocks in RocksDB. A larger value here will
@@ -312,6 +312,8 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	serverCfg.Report(startCtx)
+
 	// Run the rest of the startup process in the background to avoid preventing
 	// proper handling of signals if we get stuck on something during
 	// initialization (#10138).
@@ -326,8 +328,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 	var s *server.Server
 	errChan := make(chan error, 1)
 	go func() {
+		// Ensure that the log files see the startup messages immediately.
+		defer log.Flush()
 		defer log.RecoverAndReportPanic(startCtx)
-
 		defer sp.Finish()
 		if err := func() error {
 			if err := serverCfg.InitNode(); err != nil {
@@ -342,7 +345,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 			var err error
 			s, err = server.NewServer(serverCfg, stopper)
 			if err != nil {
-				return errors.Wrap(err, "failed to start Cockroach server")
+				return errors.Wrap(err, "failed to start server")
 			}
 
 			serverStatusMu.Lock()
@@ -405,8 +408,10 @@ func runStart(cmd *cobra.Command, args []string) error {
 				return err
 			}
 			msg := buf.String()
-			log.Infof(startCtx, "Startup message:\n%s", msg)
-			fmt.Print(msg)
+			log.Infof(startCtx, "node startup completed:\n%s", msg)
+			if !log.LoggingToStderr(log.Severity_INFO) {
+				fmt.Print(msg)
+			}
 			return nil
 		}(); err != nil {
 			errChan <- err
@@ -422,13 +427,22 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// is stopped externally (for example, via the quit endpoint).
 	select {
 	case err := <-errChan:
+		// SetSync both flushes and ensures that subsequent log writes are flushed too.
+		log.SetSync(true)
 		return err
 	case <-stopper.ShouldStop():
 		// Server is being stopped externally and our job is finished
 		// here since we don't know if it's a graceful shutdown or not.
 		<-stopper.IsStopped()
+		// SetSync both flushes and ensures that subsequent log writes are flushed too.
+		log.SetSync(true)
 		return nil
 	case sig := <-signalCh:
+		// We start synchronizing log writes from here, because if a
+		// signal was received there is a non-zero chance the sender of
+		// this signal will follow up with SIGKILL if the shutdown is not
+		// timely, and we don't want logs to be lost.
+		log.SetSync(true)
 		log.Infof(shutdownCtx, "received signal '%s'", sig)
 		if sig == os.Interrupt {
 			// Graceful shutdown after an interrupt should cause the process
@@ -489,7 +503,6 @@ func runStart(cmd *cobra.Command, args []string) error {
 		log.Infof(shutdownCtx, msgDone)
 		fmt.Fprintln(os.Stdout, msgDone)
 	}
-	log.Flush()
 
 	return returnErr
 }
@@ -556,6 +569,22 @@ func setupAndInitializeLoggingAndProfiling(startCtx context.Context) (*stop.Stop
 		// may not have been ready before the call to MkdirAll() above.
 		log.Shout(startCtx, log.Severity_WARNING, "multiple stores configured"+
 			" and --log-dir not specified, you may want to specify --log-dir to disambiguate.")
+	}
+
+	if serverInsecure {
+		// Use a non-annotated context here since the annotation just looks funny,
+		// particularly to new users (made worse by it always printing as [n?]).
+		addr := serverConnHost
+		if addr == "" {
+			addr = "<all your IP addresses>"
+		}
+		log.Shout(context.Background(), log.Severity_WARNING,
+			"RUNNING IN INSECURE MODE!\n\n"+
+				"- Your cluster is open for any client that can access "+addr+".\n"+
+				"- Any user, even root, can log in without providing a password.\n"+
+				"- Any user, connecting as root, can read or write any data in your cluster.\n"+
+				"- There is no network encryption nor authentication, and thus no confidentiality.\n\n"+
+				"Check out how to secure your cluster: https://www.cockroachlabs.com/docs/secure-a-cluster.html")
 	}
 
 	// We log build information to stdout (for the short summary), but also

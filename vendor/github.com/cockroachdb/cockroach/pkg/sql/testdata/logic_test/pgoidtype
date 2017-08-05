@@ -125,7 +125,7 @@ system  2939540337
 query OO
 SELECT 'bool'::REGTYPE, 'bool'::REGTYPE::OID
 ----
-bool  16
+boolean  16
 
 query OO
 SELECT 'numeric(10,3)'::REGTYPE, 'numeric( 10, 3 )'::REGTYPE
@@ -167,6 +167,16 @@ pg_constraint  402060402
 
 statement ok
 CREATE TABLE a (id INT PRIMARY KEY)
+
+query T
+SELECT relname from pg_class where oid='a'::regclass
+----
+a
+
+## Regression for #16767 - ensure regclass casts use normalized table names
+
+statement ok
+CREATE TABLE hasCase (id INT PRIMARY KEY)
 
 query T
 SELECT relname from pg_class where oid='a'::regclass

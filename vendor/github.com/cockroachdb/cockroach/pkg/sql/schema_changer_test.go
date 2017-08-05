@@ -1003,23 +1003,6 @@ COMMIT;
 
 			wg.Wait() // for schema change to complete
 
-			// Backfill retry happened.
-			if count, e := atomic.SwapInt64(&retriedBackfill, 0), int64(1); count != e {
-				t.Fatalf("expected = %d, found = %d", e, count)
-			}
-			// 1 failed + 2 retried backfill chunks.
-			expectNumBackfills := int64(3)
-			if testCase == testCases[len(testCases)-1] {
-				// The DROP INDEX case: The above INSERTs do not add any index
-				// entries for the inserted rows, so the index remains smaller
-				// than a backfill chunk and is dropped in a single retried
-				// backfill chunk.
-				expectNumBackfills = 2
-			}
-			if count := atomic.SwapInt64(&backfillCount, 0); count != expectNumBackfills {
-				t.Fatalf("expected = %d, found = %d", expectNumBackfills, count)
-			}
-
 			ctx := context.TODO()
 
 			// Verify the number of keys left behind in the table to validate
@@ -1925,18 +1908,24 @@ INSERT INTO t.kv VALUES ('a', 'b');
 	}{
 		// DROP TABLE followed by CREATE TABLE case.
 		{`drop-create`, `DROP TABLE t.kv`, `CREATE TABLE t.kv (k CHAR PRIMARY KEY, v CHAR)`,
-			`statement cannot follow a schema change in a transaction`},
-		// schema change followed by another statement.
+			`relation "kv" already exists`},
+		// schema change followed by another statement works.
 		{`createindex-insert`, `CREATE INDEX foo ON t.kv (v)`, `INSERT INTO t.kv VALUES ('c', 'd')`,
-			`statement cannot follow a schema change in a transaction`},
+			``},
 		// CREATE TABLE followed by INSERT works.
 		{`createtable-insert`, `CREATE TABLE t.origin (k CHAR PRIMARY KEY, v CHAR);`,
 			`INSERT INTO t.origin VALUES ('c', 'd')`, ``},
+		// Support multiple schema changes for ORMs: #15269
+		// Support insert into another table after schema changes: #15297
+		{`multiple-schema-change`,
+			`CREATE TABLE t.orm1 (k CHAR PRIMARY KEY, v CHAR); CREATE TABLE t.orm2 (k CHAR PRIMARY KEY, v CHAR);`,
+			`CREATE INDEX foo ON t.orm1 (v); CREATE INDEX foo ON t.orm2 (v); INSERT INTO t.origin VALUES ('e', 'f')`,
+			``},
 		// schema change at the end of a transaction that has written.
-		{`insert-create`, `INSERT INTO t.kv VALUES ('c', 'd')`, `CREATE INDEX foo ON t.kv (v)`,
+		{`insert-create`, `INSERT INTO t.kv VALUES ('e', 'f')`, `CREATE INDEX foo ON t.kv (v)`,
 			`schema change statement cannot follow a statement that has written in the same transaction`},
 		// schema change at the end of a read only transaction.
-		{`select-create`, `SELECT * FROM t.kv`, `CREATE INDEX foo ON t.kv (v)`, ``},
+		{`select-create`, `SELECT * FROM t.kv`, `CREATE INDEX bar ON t.kv (v)`, ``},
 	}
 
 	for _, testCase := range testCases {
@@ -2076,5 +2065,86 @@ CREATE TABLE d.t (
 				t.Errorf("expected one row but read %d", count)
 			}
 		}
+	}
+}
+
+// Test that a backfill is executed with an EvalContext generated on the
+// gateway. We assert that by checking that the same timestamp is used by all
+// the backfilled columns.
+func TestSchemaChangeEvalContext(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	const numNodes = 3
+	const chunkSize = 200
+	const maxValue = 5000
+	params, _ := createTestServerParams()
+	// Disable asynchronous schema change execution.
+	params.Knobs = base.TestingKnobs{
+		SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
+			AsyncExecNotification: asyncSchemaChangerDisabled,
+			BackfillChunkSize:     chunkSize,
+		},
+	}
+
+	tc := serverutils.StartTestCluster(t, numNodes,
+		base.TestClusterArgs{
+			ReplicationMode: base.ReplicationManual,
+			ServerArgs:      params,
+		})
+	defer tc.Stopper().Stop(context.TODO())
+	kvDB := tc.Server(0).KVClient().(*client.DB)
+	sqlDB := tc.ServerConn(0)
+
+	if _, err := sqlDB.Exec(`
+CREATE DATABASE t;
+CREATE TABLE t.test (k INT PRIMARY KEY, v INT);
+`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Bulk insert.
+	if err := bulkInsertIntoTable(sqlDB, maxValue); err != nil {
+		t.Fatal(err)
+	}
+
+	// Split the table into multiple ranges.
+	tableDesc := sqlbase.GetTableDescriptor(kvDB, "t", "test")
+	// SplitTable moves the right range, so we split things back to front
+	// in order to move less data.
+	for i := numNodes - 1; i > 0; i-- {
+		sql.SplitTable(t, tc, tableDesc, i, maxValue/numNodes*i)
+	}
+
+	testCases := []struct {
+		sql    string
+		column string
+	}{
+		{"ALTER TABLE t.test ADD COLUMN x TIMESTAMP DEFAULT current_timestamp;", "x"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.sql, func(t *testing.T) {
+
+			if _, err := sqlDB.Exec(testCase.sql); err != nil {
+				t.Fatal(err)
+			}
+
+			rows, err := sqlDB.Query(fmt.Sprintf(`SELECT DISTINCT %s from t.test`, testCase.column))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+
+			count := 0
+			for rows.Next() {
+				count++
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			if count != 1 {
+				t.Fatalf("read the wrong number of rows: e = %d, v = %d", 1, count)
+			}
+
+		})
 	}
 }

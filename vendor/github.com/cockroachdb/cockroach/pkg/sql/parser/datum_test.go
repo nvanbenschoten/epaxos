@@ -121,7 +121,7 @@ func TestDatumOrdering(t *testing.T) {
 
 		{`row(true, false, false)`, `(false, true, true)`, `(true, false, true)`,
 			`(false, false, false)`, `(true, true, true)`},
-		{`row(false, true, true)`, `(false, true, false)`, `(true, false, false)`,
+		{`row(false, true, true)`, `(false, true, false)`, `(true, NULL, NULL)`,
 			`(false, false, false)`, `(true, true, true)`},
 
 		{`row(0, 0)`, `(0, -1)`, `(0, 1)`,
@@ -129,7 +129,7 @@ func TestDatumOrdering(t *testing.T) {
 			`(9223372036854775807, 9223372036854775807)`},
 
 		{`row(0, 9223372036854775807)`,
-			`(0, 9223372036854775806)`, `(1, -9223372036854775808)`,
+			`(0, 9223372036854775806)`, `(1, NULL)`,
 			`(-9223372036854775808, -9223372036854775808)`,
 			`(9223372036854775807, 9223372036854775807)`},
 		{`row(9223372036854775807, 9223372036854775807)`,
@@ -154,26 +154,28 @@ func TestDatumOrdering(t *testing.T) {
 
 		{`row(true, NULL, false)`, `(false, NULL, true)`, `(true, NULL, true)`,
 			`(false, NULL, false)`, `(true, NULL, true)`},
-		{`row(false, NULL, true)`, `(false, NULL, false)`, `(true, NULL, false)`,
+		{`row(false, NULL, true)`, `(false, NULL, false)`, `(true, NULL, NULL)`,
 			`(false, NULL, false)`, `(true, NULL, true)`},
 
 		{`row(row(true), row(false))`, `((false), (true))`, `((true), (true))`,
 			`((false), (false))`, `((true), (true))`},
-		{`row(row(false), row(true))`, `((false), (false))`, `((true), (false))`,
+		{`row(row(false), row(true))`, `((false), (false))`, `((true), NULL)`,
 			`((false), (false))`, `((true), (true))`},
 
 		// Arrays
 
-		// TODO(nathan) Until we support literals for empty arrays, this
+		// TODO(nathan): Until we support literals for empty arrays, this
 		// is the easiest way to construct one.
-		{`current_schemas(false)`, valIsMin, `{NULL}`, `{}`, noMax},
+		{`current_schemas(false)`, valIsMin, `ARRAY[NULL]`, `ARRAY[]`, noMax},
 
-		{`array[NULL]`, noPrev, `{NULL,NULL}`, `{}`, noMax},
-		{`array[true]`, noPrev, `{true,NULL}`, `{}`, noMax},
+		{`array[NULL]`, noPrev, `ARRAY[NULL,NULL]`, `ARRAY[]`, noMax},
+		{`array[true]`, noPrev, `ARRAY[true,NULL]`, `ARRAY[]`, noMax},
 
 		// Mixed tuple/array datums.
-		{`row(ARRAY[true], row(true))`, `({true}, (false))`, `({true,NULL}, (false))`, `({}, (false))`, noMax},
-		{`row(row(false), ARRAY[true])`, noPrev, `((false), {true,NULL})`, `((false), {})`, noMax},
+		{`row(ARRAY[true], row(true))`, `(ARRAY[true], (false))`, `(ARRAY[true,NULL], NULL)`,
+			`(ARRAY[], (false))`, noMax},
+		{`row(row(false), ARRAY[true])`, noPrev, `((false), ARRAY[true,NULL])`,
+			`((false), ARRAY[])`, noMax},
 	}
 	for _, td := range testData {
 		expr := prepareExpr(t, td.datumExpr)
@@ -356,6 +358,57 @@ func TestParseDDate(t *testing.T) {
 		}
 		if expected.Compare(&EvalContext{}, actual) != 0 {
 			t.Errorf("DATE %s: got %s, expected %s", td.str, actual, expected)
+		}
+	}
+}
+
+func TestParseDTimestamp(t *testing.T) {
+	testData := []struct {
+		str      string
+		expected time.Time
+	}{
+		{"2001-02-03", time.Date(2001, time.February, 3, 0, 0, 0, 0, time.FixedZone("", 0))},
+		{"2001-02-03 04:05:06", time.Date(2001, time.February, 3, 4, 5, 6, 0, time.FixedZone("", 0))},
+		{"2001-02-03 04:05:06.000001", time.Date(2001, time.February, 3, 4, 5, 6, 1000, time.FixedZone("", 0))},
+		{"2001-02-03 04:05:06.00001", time.Date(2001, time.February, 3, 4, 5, 6, 10000, time.FixedZone("", 0))},
+		{"2001-02-03 04:05:06.0001", time.Date(2001, time.February, 3, 4, 5, 6, 100000, time.FixedZone("", 0))},
+		{"2001-02-03 04:05:06.001", time.Date(2001, time.February, 3, 4, 5, 6, 1000000, time.FixedZone("", 0))},
+		{"2001-02-03 04:05:06.01", time.Date(2001, time.February, 3, 4, 5, 6, 10000000, time.FixedZone("", 0))},
+		{"2001-02-03 04:05:06.1", time.Date(2001, time.February, 3, 4, 5, 6, 100000000, time.FixedZone("", 0))},
+		{"2001-02-03 04:05:06.12", time.Date(2001, time.February, 3, 4, 5, 6, 120000000, time.FixedZone("", 0))},
+		{"2001-02-03 04:05:06.123", time.Date(2001, time.February, 3, 4, 5, 6, 123000000, time.FixedZone("", 0))},
+		{"2001-02-03 04:05:06.1234", time.Date(2001, time.February, 3, 4, 5, 6, 123400000, time.FixedZone("", 0))},
+		{"2001-02-03 04:05:06.12345", time.Date(2001, time.February, 3, 4, 5, 6, 123450000, time.FixedZone("", 0))},
+		{"2001-02-03 04:05:06.123456", time.Date(2001, time.February, 3, 4, 5, 6, 123456000, time.FixedZone("", 0))},
+		{"2001-02-03 04:05:06.123-07", time.Date(2001, time.February, 3, 4, 5, 6, 123000000,
+			time.FixedZone("", -7*60*60))},
+		{"2001-02-03 04:05:06-07", time.Date(2001, time.February, 3, 4, 5, 6, 0,
+			time.FixedZone("", -7*60*60))},
+		{"2001-02-03 04:05:06-07:42", time.Date(2001, time.February, 3, 4, 5, 6, 0,
+			time.FixedZone("", -(7*60*60+42*60)))},
+		{"2001-02-03 04:05:06-07:30:09", time.Date(2001, time.February, 3, 4, 5, 6, 0,
+			time.FixedZone("", -(7*60*60+30*60+9)))},
+		{"2001-02-03 04:05:06+07", time.Date(2001, time.February, 3, 4, 5, 6, 0,
+			time.FixedZone("", 7*60*60))},
+		{"2001-02-03 04:0:06", time.Date(2001, time.February, 3, 4, 0, 6, 0,
+			time.FixedZone("", 0))},
+		{"2001-02-03 0:0:06", time.Date(2001, time.February, 3, 0, 0, 6, 0,
+			time.FixedZone("", 0))},
+		{"2001-02-03 4:05:0", time.Date(2001, time.February, 3, 4, 5, 0, 0,
+			time.FixedZone("", 0))},
+		{"2001-02-03 4:05:0-07:0:00", time.Date(2001, time.February, 3, 4, 5, 0, 0,
+			time.FixedZone("", -7*60*60))},
+		{"2001-02-03 4:0:6 +3:0:0", time.Date(2001, time.February, 3, 4, 0, 6, 0,
+			time.FixedZone("", 3*60*60))},
+	}
+	for _, td := range testData {
+		actual, err := ParseDTimestamp(td.str, time.Nanosecond)
+		if err != nil {
+			t.Errorf("unexpected error while parsing TIMESTAMP %s: %s", td.str, err)
+			continue
+		}
+		if !actual.Time.Equal(td.expected) {
+			t.Errorf("DATE %s: got %s, expected %s", td.str, actual, td.expected)
 		}
 	}
 }

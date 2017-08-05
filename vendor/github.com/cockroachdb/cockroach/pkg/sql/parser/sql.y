@@ -502,6 +502,7 @@ func (u *sqlSymUnion) kvOptions() []KVOption {
 %type <*OnConflict> on_conflict
 
 %type <Statement>  generic_set set_rest set_rest_more transaction_mode_list opt_transaction_mode_list set_exprs_internal
+%type <empty> opt_read_write
 
 %type <NameList> opt_storing
 %type <*ColumnTableDef> column_def
@@ -602,13 +603,7 @@ func (u *sqlSymUnion) kvOptions() []KVOption {
 %type <privilege.List> privileges privilege_list
 %type <privilege.Kind> privilege
 
-// Non-keyword token types. These are hard-wired into the "flex" lexer. They
-// must be listed first so that their numeric codes do not depend on the set of
-// keywords. PL/pgsql depends on this so that it can share the same lexer. If
-// you add/change tokens here, fix PL/pgsql to match!
-//
-// DOT_DOT is unused in the core SQL grammar, and so will always provoke parse
-// errors. It is needed by PL/pgsql.
+// Non-keyword token types.
 %token <str>   IDENT SCONST BCONST
 %token <*NumVal> ICONST FCONST
 %token <str>   PLACEHOLDER
@@ -699,7 +694,7 @@ func (u *sqlSymUnion) kvOptions() []KVOption {
 
 %token <str>   VALID VALIDATE VALUE VALUES VARCHAR VARIADIC VIEW VARYING
 
-%token <str>   WHEN WHERE WINDOW WITH WITHIN WITHOUT
+%token <str>   WHEN WHERE WINDOW WITH WITHIN WITHOUT WRITE
 
 %token <str>   YEAR
 
@@ -985,7 +980,7 @@ opt_validate_behavior:
   }
 
 opt_collate_clause:
-  COLLATE any_name { return unimplementedWithIssue(sqllex, 2473) }
+  COLLATE unrestricted_name { return unimplementedWithIssue(sqllex, 2473) }
 | /* EMPTY */ {}
 
 alter_using:
@@ -995,12 +990,10 @@ alter_using:
 backup_stmt:
   BACKUP targets TO string_or_placeholder opt_as_of_clause opt_incremental opt_with_options
   {
-    /* SKIP DOC */
     $$.val = &Backup{Targets: $2.targetList(), To: $4.expr(), IncrementalFrom: $6.exprs(), AsOf: $5.asOfClause(), Options: $7.kvOptions()}
   }
 | RESTORE targets FROM string_or_placeholder_list opt_as_of_clause opt_with_options
   {
-    /* SKIP DOC */
     $$.val = &Restore{Targets: $2.targetList(), From: $4.exprs(), AsOf: $5.asOfClause(), Options: $6.kvOptions()}
   }
 
@@ -1472,6 +1465,7 @@ set_rest_more:
   // Special syntaxes mandated by SQL standard:
 | TIME ZONE zone_value
   {
+    /* SKIP DOC */
     $$.val = &SetTimeZone{Value: $3.expr()}
   }
 | NAMES opt_encoding { return unimplemented(sqllex) }
@@ -1612,8 +1606,14 @@ show_stmt:
   {
     $$.val = &Show{Name: "all", ClusterSetting: true}
   }
+| SHOW SESSION_USER
+  {
+    /* SKIP DOC */
+    $$.val = &Show{Name: $2}
+  }
 | SHOW DATABASE
   {
+    /* SKIP DOC */
     $$.val = &Show{Name: $2}
   }
 | SHOW COLUMNS FROM var_name
@@ -1658,18 +1658,22 @@ show_stmt:
   }
 | SHOW TIME ZONE
   {
+    /* SKIP DOC */
     $$.val = &Show{Name: "TIME ZONE"}
   }
 | SHOW TRANSACTION ISOLATION LEVEL
   {
+    /* SKIP DOC */
     $$.val = &Show{Name: "TRANSACTION ISOLATION LEVEL"}
   }
 | SHOW TRANSACTION PRIORITY
   {
+    /* SKIP DOC */
     $$.val = &Show{Name: "TRANSACTION PRIORITY"}
   }
 | SHOW TRANSACTION STATUS
   {
+    /* SKIP DOC */
     $$.val = &ShowTransactionStatus{}
   }
 | SHOW CREATE TABLE var_name
@@ -1877,9 +1881,9 @@ col_qualification:
   {
     $$.val = NamedColumnQualification{Qualification: $1.colQualElem()}
   }
-| COLLATE any_name
+| COLLATE unrestricted_name
   {
-    $$.val = NamedColumnQualification{Qualification: ColumnCollation($2.unresolvedName().String())}
+    $$.val = NamedColumnQualification{Qualification: ColumnCollation($2)}
   }
 | FAMILY name
   {
@@ -2192,7 +2196,7 @@ index_elem:
 | '(' a_expr ')' opt_collate opt_asc_desc { return unimplemented(sqllex) }
 
 opt_collate:
-  COLLATE any_name { return unimplemented(sqllex) }
+  COLLATE unrestricted_name { return unimplementedWithIssue(sqllex, 2473) }
 | /* EMPTY */ {}
 
 opt_asc_desc:
@@ -2278,11 +2282,11 @@ savepoint_stmt:
 
 // BEGIN / START / COMMIT / END / ROLLBACK / ...
 transaction_stmt:
-  BEGIN opt_transaction opt_transaction_mode_list
+  BEGIN opt_transaction opt_transaction_mode_list opt_read_write
   {
     $$.val = $3.stmt()
   }
-| START TRANSACTION opt_transaction_mode_list
+| START TRANSACTION opt_transaction_mode_list opt_read_write
   {
     $$.val = $3.stmt()
   }
@@ -2302,6 +2306,11 @@ transaction_stmt:
       $$.val = &RollbackTransaction{}
     }
   }
+
+opt_read_write:
+  READ WRITE {}
+| READ ONLY { return unimplemented(sqllex) }
+| /* EMPTY */ {}
 
 opt_transaction:
   TRANSACTION {}
@@ -3770,9 +3779,9 @@ a_expr:
   {
     $$.val = &AnnotateTypeExpr{Expr: $1.expr(), Type: $3.colType(), syntaxMode: annotateShort}
   }
-| a_expr COLLATE any_name
+| a_expr COLLATE unrestricted_name
   {
-    $$.val = &CollateExpr{Expr: $1.expr(), Locale: $3.unresolvedName().String()}
+    $$.val = &CollateExpr{Expr: $1.expr(), Locale: $3}
   }
 | a_expr AT TIME ZONE a_expr %prec AT { return unimplemented(sqllex) }
   // These operators must be called out explicitly in order to make use of
@@ -5307,6 +5316,7 @@ unreserved_keyword:
 | VARYING
 | WITHIN
 | WITHOUT
+| WRITE
 | YEAR
 | ZONE
 

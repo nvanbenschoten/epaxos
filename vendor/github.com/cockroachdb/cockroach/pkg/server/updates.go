@@ -22,21 +22,26 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"time"
 
+	"github.com/mitchellh/reflectwalk"
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/build"
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 const baseUpdatesURL = `https://register.cockroachdb.com/api/clusters/updates`
-const baseReportingURL = `https://register.cockroachdb.com/api/report`
+const baseReportingURL = `https://register.cockroachdb.com/api/clusters/report`
 
 var updatesURL, reportingURL *url.URL
 
@@ -59,12 +64,26 @@ func init() {
 const (
 	updateCheckFrequency = time.Hour * 24
 	// TODO(dt): switch to settings.
-	diagnosticReportFrequency = updateCheckFrequency
 	updateCheckPostStartup    = time.Minute * 5
 	updateCheckRetryFrequency = time.Hour
 	updateMaxVersionsToReport = 3
 
 	updateCheckJitterSeconds = 120
+)
+
+var (
+	diagnosticReportFrequency = settings.RegisterDurationSetting(
+		"diagnostics.reporting.interval",
+		"interval at which diagnostics data should be reported",
+		time.Hour,
+	)
+
+	// TODO(dt): this should be split from the report interval.
+	// statsResetFrequency = settings.RegisterDurationSetting(
+	// 	"sql.metrics.statement_details.reset_interval",
+	// 	"interval at which the collected statement statistics should be reset",
+	// 	time.Hour,
+	// )
 )
 
 // randomly shift `d` to be up to `jitterSec` shorter or longer.
@@ -79,8 +98,10 @@ type versionInfo struct {
 }
 
 type reportingInfo struct {
-	Node   nodeInfo    `json:"node"`
-	Stores []storeInfo `json:"stores"`
+	Node       nodeInfo                                          `json:"node"`
+	Stores     []storeInfo                                       `json:"stores"`
+	Schema     []sqlbase.TableDescriptor                         `json:"schema"`
+	QueryStats map[string]map[string]roachpb.StatementStatistics `json:"sqlstats"`
 }
 
 type nodeInfo struct {
@@ -101,20 +122,22 @@ type storeInfo struct {
 // PeriodicallyCheckForUpdates starts a background worker that periodically
 // phones home to check for updates and report usage.
 func (s *Server) PeriodicallyCheckForUpdates() {
-	s.stopper.RunWorker(context.TODO(), func(context.Context) {
+	s.stopper.RunWorker(context.TODO(), func(ctx context.Context) {
 		startup := timeutil.Now()
-		var nextUpdateCheck, nextDiagnosticReport time.Time
+		nextUpdateCheck := startup
+		nextDiagnosticReport := startup
 
 		var timer timeutil.Timer
 		defer timer.Stop()
 		for {
-			runningTime := timeutil.Since(startup)
+			now := timeutil.Now()
+			runningTime := now.Sub(startup)
 
-			nextUpdateCheck = s.maybeCheckForUpdates(nextUpdateCheck, runningTime)
-			nextDiagnosticReport = s.maybeReportDiagnostics(nextDiagnosticReport, runningTime)
+			nextUpdateCheck = s.maybeCheckForUpdates(now, nextUpdateCheck, runningTime)
+			nextDiagnosticReport = s.maybeReportDiagnostics(ctx, now, nextDiagnosticReport, runningTime)
 
 			sooner := nextUpdateCheck
-			if nextDiagnosticReport.Before(nextUpdateCheck) {
+			if nextDiagnosticReport.Before(sooner) {
 				sooner = nextDiagnosticReport
 			}
 
@@ -131,15 +154,17 @@ func (s *Server) PeriodicallyCheckForUpdates() {
 
 // maybeCheckForUpdates determines if it is time to check for updates and does
 // so if it is, before returning the time at which the next check be done.
-func (s *Server) maybeCheckForUpdates(scheduled time.Time, runningTime time.Duration) time.Time {
-	if scheduled.After(timeutil.Now()) {
+func (s *Server) maybeCheckForUpdates(
+	now, scheduled time.Time, runningTime time.Duration,
+) time.Time {
+	if scheduled.After(now) {
 		return scheduled
 	}
 
 	// checkForUpdates handles its own errors, but it returns a bool indicating if
 	// it succeeded, so we can schedule a re-attempt if it did not.
 	if succeeded := s.checkForUpdates(runningTime); !succeeded {
-		return timeutil.Now().Add(updateCheckRetryFrequency)
+		return now.Add(updateCheckRetryFrequency)
 	}
 
 	// If we've just started up, we want to check again shortly after.
@@ -147,10 +172,10 @@ func (s *Server) maybeCheckForUpdates(scheduled time.Time, runningTime time.Dura
 	// human operator so we check as early as possible, but this makes it hard to
 	// differentiate real deployments vs short-lived instances for tests.
 	if runningTime < updateCheckPostStartup {
-		return timeutil.Now().Add(time.Hour - runningTime)
+		return now.Add(time.Hour - runningTime)
 	}
 
-	return timeutil.Now().Add(updateCheckFrequency)
+	return now.Add(updateCheckFrequency)
 }
 
 // checkForUpdates calls home to check for new versions for the current platform
@@ -208,35 +233,31 @@ func (s *Server) checkForUpdates(runningTime time.Duration) bool {
 	return true
 }
 
-// "diagnostics.reporting.enabled" enables reporting of metrics related to a
-// node's storage (number, size and health of ranges) back to CockroachDB.
-// Collecting this data from production clusters helps us understand and improve
-// how our storage systems behave in real-world use cases.
-//
-// Note: while the setting itself is actually defined with a default value of
-// `false`, it is usually automatically set to `true` when a cluster is created
-// (or is migrated from a earlier beta version). This can be prevented with the
-// env var COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING.
-//
-// Doing this, rather than just using a default of `true`, means that a node
-// will not errantly send a report using a default before loading settings.
-var diagnosticsReportingEnabled = settings.RegisterBoolSetting(
-	"diagnostics.reporting.enabled", "enable reporting diagnostic metrics to cockroach labs", false,
+var diagnosticsMetricsEnabled = settings.RegisterBoolSetting(
+	"diagnostics.reporting.report_metrics",
+	"enable collection and reporting diagnostic metrics to cockroach labs",
+	true,
 )
 
-func (s *Server) maybeReportDiagnostics(scheduled time.Time, running time.Duration) time.Time {
-	if scheduled.After(timeutil.Now()) {
+func (s *Server) maybeReportDiagnostics(
+	ctx context.Context, now, scheduled time.Time, running time.Duration,
+) time.Time {
+	if scheduled.After(now) {
 		return scheduled
 	}
 
-	if diagnosticsReportingEnabled.Get() {
-		s.reportDiagnostics()
+	// TODO(dt): we should allow tuning the reset and report intervals separately.
+	// Consider something like rand.Float() > resetFreq/reportFreq here to sample
+	// stat reset periods for reporting.
+	if log.DiagnosticsReportingEnabled.Get() && diagnosticsMetricsEnabled.Get() {
+		s.reportDiagnostics(running)
 	}
+	s.sqlExecutor.ResetStatementStats(ctx)
 
-	return scheduled.Add(diagnosticReportFrequency)
+	return scheduled.Add(diagnosticReportFrequency.Get())
 }
 
-func (s *Server) getReportingInfo() reportingInfo {
+func (s *Server) getReportingInfo(ctx context.Context) reportingInfo {
 	n := s.node.recorder.GetStatusSummary()
 
 	summary := nodeInfo{NodeID: s.node.Descriptor.NodeID}
@@ -253,15 +274,22 @@ func (s *Server) getReportingInfo() reportingInfo {
 		stores[i].Bytes = bytes
 		summary.Bytes += bytes
 	}
-	return reportingInfo{summary, stores}
+
+	schema, err := s.collectSchemaInfo(ctx)
+	if err != nil {
+		log.Warningf(ctx, "error collecting schema info for diagnostic report: %+v", err)
+		schema = nil
+	}
+
+	return reportingInfo{summary, stores, schema, s.sqlExecutor.GetScrubbedStmtStats()}
 }
 
-func (s *Server) reportDiagnostics() {
+func (s *Server) reportDiagnostics(runningTime time.Duration) {
 	ctx, span := s.AnnotateCtxWithSpan(context.Background(), "usageReport")
 	defer span.Finish()
 
 	b := new(bytes.Buffer)
-	if err := json.NewEncoder(b).Encode(s.getReportingInfo()); err != nil {
+	if err := json.NewEncoder(b).Encode(s.getReportingInfo(ctx)); err != nil {
 		log.Warning(ctx, err)
 		return
 	}
@@ -269,6 +297,7 @@ func (s *Server) reportDiagnostics() {
 	q := reportingURL.Query()
 	q.Set("version", build.GetInfo().Tag)
 	q.Set("uuid", s.node.ClusterID.String())
+	q.Set("uptime", strconv.Itoa(int(runningTime.Seconds())))
 	reportingURL.RawQuery = q.Encode()
 
 	res, err := http.Post(reportingURL.String(), "application/json", b)
@@ -287,4 +316,37 @@ func (s *Server) reportDiagnostics() {
 		log.Warningf(ctx, "failed to report node usage metrics: status: %s, body: %s, "+
 			"error: %v", res.Status, b, err)
 	}
+}
+
+func (s *Server) collectSchemaInfo(ctx context.Context) ([]sqlbase.TableDescriptor, error) {
+	startKey := roachpb.Key(keys.MakeTablePrefix(keys.DescriptorTableID))
+	endKey := startKey.PrefixEnd()
+	kvs, err := s.db.Scan(ctx, startKey, endKey, 0)
+	if err != nil {
+		return nil, err
+	}
+	tables := make([]sqlbase.TableDescriptor, 0, len(kvs))
+	redactor := stringRedactor{}
+	for _, kv := range kvs {
+		var desc sqlbase.Descriptor
+		if err := kv.ValueProto(&desc); err != nil {
+			return nil, errors.Wrapf(err, "%s: unable to unmarshal SQL descriptor", kv.Key)
+		}
+		if t := desc.GetTable(); t != nil && t.ID > keys.MaxReservedDescID {
+			if err := reflectwalk.Walk(t, redactor); err != nil {
+				panic(err) // stringRedactor never returns a non-nil err
+			}
+			tables = append(tables, *t)
+		}
+	}
+	return tables, nil
+}
+
+type stringRedactor struct{}
+
+func (stringRedactor) Primitive(v reflect.Value) error {
+	if v.Kind() == reflect.String && v.String() != "" {
+		v.Set(reflect.ValueOf("_"))
+	}
+	return nil
 }

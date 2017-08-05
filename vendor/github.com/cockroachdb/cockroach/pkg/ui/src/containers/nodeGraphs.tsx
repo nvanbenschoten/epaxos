@@ -138,7 +138,7 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
     return <div className="section l-columns">
       <div className="chart-group l-columns__left">
         <GraphGroup groupId="node.overview" hide={dashboard !== "overview"}>
-          <LineGraph title="SQL Queries" sources={nodeSources} tooltip={`The average number of SELECT, INSERT, UPDATE, and DELETE statements per second across ${specifier}.`}>
+          <LineGraph title="SQL Queries" sources={nodeSources} tooltip={`The average number of SELECT, INSERT, UPDATE, and DELETE statements per second ${specifier}.`}>
             <Axis>
               <Metric name="cr.node.sql.select.count" title="Total Reads" nonNegativeRate />
               <Metric name="cr.node.sql.distsql.select.count" title="DistSQL Reads" nonNegativeRate />
@@ -147,15 +147,21 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
               <Metric name="cr.node.sql.delete.count" title="Deletes" nonNegativeRate />
             </Axis>
           </LineGraph>
-          <LineGraph title="Exec Latency: 99th percentile"
-          tooltip={`The 99th percentile of latency between query requests and responses
-                    over a 1 minute period.
-                    Values are displayed individually for each node on each node.`}>
+
+          <LineGraph title="Service Latency: SQL, 99th percentile"
+                       tooltip={(
+                    <div>
+                      Over the last minute, this node executed 99% of queries within this time.&nbsp;
+                      <em>
+                      This time does not include network latency between the node and client.
+                      </em>
+                    </div>)}
+          >
             <Axis units={ AxisUnits.Duration }>
               {
                 _.map(nodeIDs, (node) =>
                   <Metric key={node}
-                          name="cr.node.exec.latency-p99"
+                          name="cr.node.sql.service.latency-p99"
                           title={this.nodeAddress(node)}
                           sources={[node]}
                           downsampleMax />,
@@ -163,24 +169,16 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
               }
             </Axis>
           </LineGraph>
-          <LineGraph title="Exec Latency: 90th percentile"
-                    tooltip={`The 90th percentile of latency between query requests and responses
-                              over a 1 minute period.
-                              Values are displayed individually for each node on each node.`}>
-            <Axis units={ AxisUnits.Duration }>
-              {
-                _.map(nodeIDs, (node) =>
-                  <Metric key={node}
-                          name="cr.node.exec.latency-p90"
-                          title={this.nodeAddress(node)}
-                          sources={[node]}
-                          downsampleMax />,
-                )
-              }
-            </Axis>
-          </LineGraph>
-          <LineGraph title="Replicas per Store"
-                    tooltip={`The number of replicas on each store.`}>
+
+          <LineGraph title="Replicas per Node"
+                    tooltip={(
+                    <div>
+                      The number of range replicas stored on this node.&nbsp;
+                      <em>
+                      Ranges are subsets of your data, which are replicated to ensure survivability.
+                      </em>
+                    </div>)}
+          >
             <Axis>
               {
                 _.map(nodeIDs, (nid) =>
@@ -192,7 +190,17 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
               }
             </Axis>
           </LineGraph>
-          <LineGraph title="Capacity" sources={storeSources} tooltip={`Summary of total and available capacity ${specifier}.`}>
+          <LineGraph title="Capacity" sources={storeSources} tooltip={(
+              <div>
+                <dl>
+                  <dt>Capacity</dt>
+                  <dd>Total disk space available {specifier} to CockroachDB. <em>Control this value per node with the <code><a href="https://www.cockroachlabs.com/docs/start-a-node.html#flags" target="_blank">--store</a></code> flag.</em></dd>
+                  <dt>Available</dt>
+                  <dd>Free disk space available {specifier} to CockroachDB.</dd>
+                </dl>
+              </div>
+            )}
+          >
             <Axis units={AxisUnits.Bytes}>
               <Metric name="cr.store.capacity" title="Capacity" />
               {
@@ -213,13 +221,27 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
             </Axis>
           </LineGraph>
 
-          <LineGraph title="Memory Usage" sources={nodeSources} tooltip={<div>{`Memory in use ${specifier}:`}<dl>
-            <dt>RSS</dt><dd>Total memory in use by CockroachDB</dd>
-            <dt>Go Allocated</dt><dd>Memory allocated by the Go layer</dd>
-            <dt>Go Total</dt><dd>Total memory managed by the Go layer</dd>
-            <dt>C Allocated</dt><dd>Memory allocated by the C layer</dd>
-            <dt>C Total</dt><dd>Total memory managed by the C layer</dd>
-            </dl></div>}>
+          <LineGraph
+            title="Memory Usage"
+            sources={nodeSources}
+            tooltip={(
+              <div>
+                {`Memory in use ${specifier}:`}
+                <dl>
+                  <dt>RSS</dt>
+                  <dd>Total memory in use by CockroachDB</dd>
+                  <dt>Go Allocated</dt>
+                  <dd>Memory allocated by the Go layer</dd>
+                  <dt>Go Total</dt>
+                  <dd>Total memory managed by the Go layer</dd>
+                  <dt>C Allocated</dt>
+                  <dd>Memory allocated by the C layer</dd>
+                  <dt>C Total</dt>
+                  <dd>Total memory managed by the C layer</dd>
+                </dl>
+              </div>
+            )}
+          >
             <Axis units={ AxisUnits.Bytes }>
               <Metric name="cr.node.sys.rss" title="Total memory (RSS)" />
               <Metric name="cr.node.sys.go.allocbytes" title="Go Allocated" />
@@ -255,6 +277,7 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
             <Axis units={ AxisUnits.Duration }>
               <Metric name="cr.node.sys.cpu.user.ns" title="User CPU Time" nonNegativeRate />
               <Metric name="cr.node.sys.cpu.sys.ns" title="Sys CPU Time" nonNegativeRate />
+              <Metric name="cr.node.sys.gc.pause.ns" title="GC Pause Time" nonNegativeRate />
             </Axis>
           </LineGraph>
 
@@ -267,14 +290,14 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
             </Axis>
           </LineGraph>
 
-          <LineGraph title="SQL Byte Traffic" sources={nodeSources} tooltip={`The average amount of SQL client network traffic in bytes per second ${specifier}.`}>
+          <LineGraph title="SQL Byte Traffic" sources={nodeSources} tooltip={`The total amount of SQL client network traffic in bytes per second ${specifier}.`}>
             <Axis units={ AxisUnits.Bytes }>
               <Metric name="cr.node.sql.bytesin" title="Bytes In" nonNegativeRate />
               <Metric name="cr.node.sql.bytesout" title="Bytes Out" nonNegativeRate />
             </Axis>
           </LineGraph>
 
-          <LineGraph title="SQL Queries" sources={nodeSources} tooltip={`The average number of SELECT, INSERT, UPDATE, and DELETE statements per second ${specifier}.`}>
+          <LineGraph title="SQL Queries" sources={nodeSources} tooltip={`The total number of SELECT, INSERT, UPDATE, and DELETE statements per second ${specifier}.`}>
             <Axis>
               <Metric name="cr.node.sql.select.count" title="Total Reads" nonNegativeRate />
               <Metric name="cr.node.sql.distsql.select.count" title="DistSQL Reads" nonNegativeRate />
@@ -284,13 +307,20 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
             </Axis>
           </LineGraph>
 
-          <LineGraph title="Backend Statement Execution Latency: SQL, 99th percentile"
-                       tooltip={`The latency of backend statements executed over 10 second periods ${specifier}.`}>
+          <LineGraph title="Service Latency: SQL, 99th percentile"
+                       tooltip={(
+                    <div>
+                      Over the last minute, this node executed 99% of queries within this time.&nbsp;
+                      <em>
+                      This time does not include network latency between the node and client.
+                      </em>
+                    </div>)}
+            >
             <Axis units={ AxisUnits.Duration }>
               {
                 _.map(nodeIDs, (node) =>
                   <Metric key={node}
-                          name="cr.node.sql.exec.latency-p99"
+                          name="cr.node.sql.service.latency-p99"
                           title={this.nodeAddress(node)}
                           sources={[node]}
                           downsampleMax />,
@@ -299,13 +329,20 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
             </Axis>
           </LineGraph>
 
-          <LineGraph title="Backend Statement Execution Latency: SQL, 90th percentile"
-                       tooltip={`The latency of backend statements executed over 10 second periods ${specifier}.`}>
+          <LineGraph title="Service Latency: SQL, 90th percentile"
+                       tooltip={(
+                    <div>
+                      Over the last minute, this node executed 90% of queries within this time.&nbsp;
+                      <em>
+                      This time does not include network latency between the node and client.
+                      </em>
+                    </div>)}
+          >
             <Axis units={ AxisUnits.Duration }>
               {
                 _.map(nodeIDs, (node) =>
                   <Metric key={node}
-                          name="cr.node.sql.exec.latency-p90"
+                          name="cr.node.sql.service.latency-p90"
                           title={this.nodeAddress(node)}
                           sources={[node]}
                           downsampleMax />,
@@ -314,13 +351,13 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
             </Axis>
           </LineGraph>
 
-          <LineGraph title="Backend Statement Execution Latency: DistSQL, 99th percentile"
-                       tooltip={`The latency of backend statements executed over 10 second periods ${specifier}.`}>
+          <LineGraph title="Service Latency: DistSQL, 99th percentile"
+                       tooltip={`The latency of distributed SQL statements serviced over 10 second periods ${specifier}.`}>
             <Axis units={ AxisUnits.Duration }>
               {
                 _.map(nodeIDs, (node) =>
                   <Metric key={node}
-                          name="cr.node.sql.distsql.exec.latency-p99"
+                          name="cr.node.sql.distsql.service.latency-p99"
                           title={this.nodeAddress(node)}
                           sources={[node]}
                           downsampleMax />,
@@ -329,13 +366,13 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
             </Axis>
           </LineGraph>
 
-          <LineGraph title="Backend Statement Execution Latency: DistSQL, 90th percentile"
-                       tooltip={`The latency of backend statements executed over 10 second periods ${specifier}.`}>
+          <LineGraph title="Service Latency: DistSQL, 90th percentile"
+                       tooltip={`The latency of distributed SQL statements serviced over 10 second periods ${specifier}.`}>
             <Axis units={ AxisUnits.Duration }>
               {
                 _.map(nodeIDs, (node) =>
                   <Metric key={node}
-                          name="cr.node.sql.distsql.exec.latency-p90"
+                          name="cr.node.sql.distsql.service.latency-p90"
                           title={this.nodeAddress(node)}
                           sources={[node]}
                           downsampleMax />,
@@ -344,7 +381,7 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
             </Axis>
           </LineGraph>
 
-          <LineGraph title="Exec Latency: 99th percentile"
+          <LineGraph title="Execution Latency: 99th percentile"
                     tooltip={`The 99th percentile of latency between query requests and responses
                               over a 1 minute period.
                               Values are displayed individually for each node on each node.`}>
@@ -361,7 +398,7 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
             </Axis>
           </LineGraph>
 
-          <LineGraph title="Exec Latency: 90th percentile"
+          <LineGraph title="Execution Latency: 90th percentile"
                     tooltip={`The 90th percentile of latency between query requests and responses
                               over a 1 minute period.
                               Values are displayed individually for each node on each node.`}>
@@ -378,7 +415,7 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
             </Axis>
           </LineGraph>
 
-          <LineGraph title="Transactions" sources={nodeSources} tooltip={`The average number of transactions opened, committed, rolled back, or aborted per second ${specifier}.`}>
+          <LineGraph title="Transactions" sources={nodeSources} tooltip={`The total number of transactions opened, committed, rolled back, or aborted per second ${specifier}.`}>
             <Axis>
               <Metric name="cr.node.sql.txn.begin.count" title="Begin" nonNegativeRate />
               <Metric name="cr.node.sql.txn.commit.count" title="Commits" nonNegativeRate />
@@ -387,7 +424,7 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
             </Axis>
           </LineGraph>
 
-          <LineGraph title="Schema Changes" sources={nodeSources} tooltip={`The average number of DDL statements per second ${specifier}.`}>
+          <LineGraph title="Schema Changes" sources={nodeSources} tooltip={`The total number of DDL statements per second ${specifier}.`}>
             <Axis>
               <Metric name="cr.node.sql.ddl.count" title="DDL Statements" nonNegativeRate />
             </Axis>
@@ -413,6 +450,32 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
             <Axis units={ AxisUnits.Bytes }>
               <Metric name="cr.store.livebytes" title="Live" />
               <Metric name="cr.store.sysbytes" title="System" />
+            </Axis>
+          </LineGraph>
+
+          <LineGraph title="Log Commit Latency: 99th Percentile" sources={storeSources} tooltip={`The 99th %ile latency for commits to the Raft Log.`}>
+            <Axis units={AxisUnits.Duration}>
+              {
+                _.map(nodeIDs, (nid) =>
+                  <Metric key={nid}
+                          name="cr.store.raft.process.logcommit.latency-p99"
+                          title={this.nodeAddress(nid)}
+                          sources={this.storeIDsForNode(nid)} />,
+                )
+              }
+            </Axis>
+          </LineGraph>
+
+          <LineGraph title="Command Commit Latency: 99th Percentile" sources={storeSources} tooltip={`The 99th %ile latency for commits of Raft commands.`}>
+            <Axis units={AxisUnits.Duration}>
+              {
+                _.map(nodeIDs, (nid) =>
+                  <Metric key={nid}
+                          name="cr.store.raft.process.commandcommit.latency-p99"
+                          title={this.nodeAddress(nid)}
+                          sources={this.storeIDsForNode(nid)} />,
+                )
+              }
             </Axis>
           </LineGraph>
 
@@ -501,6 +564,80 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
             </Axis>
           </LineGraph>
         </GraphGroup>
+
+        <GraphGroup groupId="node.distributed" hide={dashboard !== "distributed"}>
+          <LineGraph title="Batches" sources={nodeSources}>
+            <Axis>
+              <Metric name="cr.node.distsender.batches" title="Batches" nonNegativeRate />
+              <Metric name="cr.node.distsender.batches.partial" title="Partial Batches" nonNegativeRate />
+            </Axis>
+          </LineGraph>
+
+          <LineGraph title="RPCs" sources={nodeSources}>
+            <Axis>
+              <Metric name="cr.node.distsender.rpc.sent" title="RPCs Sent" nonNegativeRate />
+              <Metric name="cr.node.distsender.rpc.sent.local" title="Local Fast-path" nonNegativeRate />
+            </Axis>
+          </LineGraph>
+
+          <LineGraph title="RPC Errors" sources={nodeSources}>
+            <Axis>
+              <Metric name="cr.node.distsender.rpc.sent.sendnexttimeout" title="RPC Timeouts" nonNegativeRate />
+              <Metric name="cr.node.distsender.rpc.sent.nextreplicaerror" title="Replica Errors" nonNegativeRate />
+              <Metric name="cr.node.distsender.errors.notleaseholder" title="Not Leaseholder Errors" nonNegativeRate />
+            </Axis>
+          </LineGraph>
+
+          <LineGraph title="KV Transactions" sources={nodeSources}>
+            <Axis>
+              <Metric name="cr.node.txn.commits" title="Committed" nonNegativeRate />
+              <Metric name="cr.node.txn.commits1PC" title="Fast-path Committed" nonNegativeRate />
+              <Metric name="cr.node.txn.aborts" title="Aborted" nonNegativeRate />
+              <Metric name="cr.node.txn.abandons" title="Abandoned" nonNegativeRate />
+            </Axis>
+          </LineGraph>
+
+          <LineGraph title="KV Transaction Restarts" sources={nodeSources}>
+            <Axis>
+              <Metric name="cr.node.txn.restarts.writetooold" title="Write Too Old" nonNegativeRate />
+              <Metric name="cr.node.txn.restarts.deleterange" title="Forwarded Timestamp (delete range)" nonNegativeRate />
+              <Metric name="cr.node.txn.restarts.serializable" title="Forwarded Timestamp (iso=serializable)" nonNegativeRate />
+              <Metric name="cr.node.txn.restarts.possiblereplay" title="Possible Replay" nonNegativeRate />
+            </Axis>
+          </LineGraph>
+
+          <LineGraph title="KV Transaction Durations: 99th percentile"
+                    tooltip={`The 99th percentile of transaction durations over a 1 minute period.
+                              Values are displayed individually for each node on each node.`}>
+            <Axis units={ AxisUnits.Duration }>
+              {
+                _.map(nodeIDs, (node) =>
+                  <Metric key={node}
+                          name="cr.node.txn.durations-p99"
+                          title={this.nodeAddress(node)}
+                          sources={[node]}
+                          downsampleMax />,
+                )
+              }
+            </Axis>
+          </LineGraph>
+
+          <LineGraph title="KV Transaction Durations: 90th percentile"
+                    tooltip={`The 90th percentile of transaction durations over a 1 minute period.
+                              Values are displayed individually for each node on each node.`}>
+            <Axis units={ AxisUnits.Duration }>
+              {
+                _.map(nodeIDs, (node) =>
+                  <Metric key={node}
+                          name="cr.node.txn.durations-p90"
+                          title={this.nodeAddress(node)}
+                          sources={[node]}
+                          downsampleMax />,
+                )
+              }
+            </Axis>
+          </LineGraph>
+      </GraphGroup>
 
         <GraphGroup groupId="node.queues" hide={dashboard !== "queues"}>
           <LineGraph title="Queue Processing Failures" sources={storeSources}>

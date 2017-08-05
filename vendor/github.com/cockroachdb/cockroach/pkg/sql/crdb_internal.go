@@ -332,12 +332,26 @@ CREATE TABLE crdb_internal.jobs (
 	},
 }
 
+type stmtList []stmtKey
+
+func (s stmtList) Len() int {
+	return len(s)
+}
+func (s stmtList) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
+}
+func (s stmtList) Less(i, j int) bool {
+	return s[i].stmt < s[j].stmt
+}
+
 var crdbInternalStmtStatsTable = virtualSchemaTable{
 	schema: `
 CREATE TABLE crdb_internal.node_statement_statistics (
   node_id             INT NOT NULL,
   application_name    STRING NOT NULL,
+  flags               STRING NOT NULL,
   key                 STRING NOT NULL,
+  anonymized          STRING,
   count               INT NOT NULL,
   first_attempt_count INT NOT NULL,
   max_retries         INT NOT NULL,
@@ -385,16 +399,21 @@ CREATE TABLE crdb_internal.node_statement_statistics (
 
 			// Retrieve the statement keys and sort them to ensure the
 			// output is deterministic.
-			var stmtKeys []string
+			var stmtKeys stmtList
 			appStats.Lock()
 			for k := range appStats.stmts {
 				stmtKeys = append(stmtKeys, k)
 			}
 			appStats.Unlock()
-			sort.Strings(stmtKeys)
 
 			// Now retrieve the per-stmt stats proper.
 			for _, stmtKey := range stmtKeys {
+				anonymized := parser.DNull
+				anonStr, ok := scrubStmtStatKey(p.session.virtualSchemas, stmtKey.stmt)
+				if ok {
+					anonymized = parser.NewDString(anonStr)
+				}
+
 				s := appStats.getStatsForStmt(stmtKey)
 
 				s.Lock()
@@ -405,23 +424,25 @@ CREATE TABLE crdb_internal.node_statement_statistics (
 				err := addRow(
 					nodeID,
 					parser.NewDString(appName),
-					parser.NewDString(stmtKey),
+					parser.NewDString(stmtKey.flags()),
+					parser.NewDString(stmtKey.stmt),
+					anonymized,
 					parser.NewDInt(parser.DInt(s.data.Count)),
 					parser.NewDInt(parser.DInt(s.data.FirstAttemptCount)),
 					parser.NewDInt(parser.DInt(s.data.MaxRetries)),
 					errString,
 					parser.NewDFloat(parser.DFloat(s.data.NumRows.Mean)),
-					parser.NewDFloat(parser.DFloat(s.data.NumRows.getVariance(s.data.Count))),
+					parser.NewDFloat(parser.DFloat(s.data.NumRows.GetVariance(s.data.Count))),
 					parser.NewDFloat(parser.DFloat(s.data.ParseLat.Mean)),
-					parser.NewDFloat(parser.DFloat(s.data.ParseLat.getVariance(s.data.Count))),
+					parser.NewDFloat(parser.DFloat(s.data.ParseLat.GetVariance(s.data.Count))),
 					parser.NewDFloat(parser.DFloat(s.data.PlanLat.Mean)),
-					parser.NewDFloat(parser.DFloat(s.data.PlanLat.getVariance(s.data.Count))),
+					parser.NewDFloat(parser.DFloat(s.data.PlanLat.GetVariance(s.data.Count))),
 					parser.NewDFloat(parser.DFloat(s.data.RunLat.Mean)),
-					parser.NewDFloat(parser.DFloat(s.data.RunLat.getVariance(s.data.Count))),
+					parser.NewDFloat(parser.DFloat(s.data.RunLat.GetVariance(s.data.Count))),
 					parser.NewDFloat(parser.DFloat(s.data.ServiceLat.Mean)),
-					parser.NewDFloat(parser.DFloat(s.data.ServiceLat.getVariance(s.data.Count))),
+					parser.NewDFloat(parser.DFloat(s.data.ServiceLat.GetVariance(s.data.Count))),
 					parser.NewDFloat(parser.DFloat(s.data.OverheadLat.Mean)),
-					parser.NewDFloat(parser.DFloat(s.data.OverheadLat.getVariance(s.data.Count))),
+					parser.NewDFloat(parser.DFloat(s.data.OverheadLat.GetVariance(s.data.Count))),
 				)
 				s.Unlock()
 				if err != nil {

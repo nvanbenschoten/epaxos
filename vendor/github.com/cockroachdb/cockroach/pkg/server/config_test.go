@@ -36,7 +36,7 @@ func TestParseInitNodeAttributes(t *testing.T) {
 	cfg := MakeConfig()
 	cfg.Attrs = "attr1=val1::attr2=val2"
 	cfg.Stores = base.StoreSpecList{Specs: []base.StoreSpec{{InMemory: true, SizeInBytes: base.MinimumStoreSize * 100}}}
-	engines, err := cfg.CreateEngines()
+	engines, err := cfg.CreateEngines(context.TODO())
 	if err != nil {
 		t.Fatalf("Failed to initialize stores: %s", err)
 	}
@@ -57,7 +57,7 @@ func TestParseJoinUsingAddrs(t *testing.T) {
 	cfg := MakeConfig()
 	cfg.JoinList = []string{"localhost:12345,,localhost:23456", "localhost:34567"}
 	cfg.Stores = base.StoreSpecList{Specs: []base.StoreSpec{{InMemory: true, SizeInBytes: base.MinimumStoreSize * 100}}}
-	engines, err := cfg.CreateEngines()
+	engines, err := cfg.CreateEngines(context.TODO())
 	if err != nil {
 		t.Fatalf("Failed to initialize stores: %s", err)
 	}
@@ -91,9 +91,6 @@ func TestReadEnvironmentVariables(t *testing.T) {
 	resetEnvVar := func() {
 		// Reset all environment variables in case any were already set.
 		if err := os.Unsetenv("COCKROACH_LINEARIZABLE"); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Unsetenv("COCKROACH_MAX_OFFSET"); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Unsetenv("COCKROACH_METRICS_SAMPLE_INTERVAL"); err != nil {
@@ -134,10 +131,6 @@ func TestReadEnvironmentVariables(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfgExpected.Linearizable = true
-	if err := os.Setenv("COCKROACH_MAX_OFFSET", "1s"); err != nil {
-		t.Fatal(err)
-	}
-	cfgExpected.MaxOffset = time.Second
 	if err := os.Setenv("COCKROACH_METRICS_SAMPLE_INTERVAL", "1h10m"); err != nil {
 		t.Fatal(err)
 	}
@@ -158,10 +151,6 @@ func TestReadEnvironmentVariables(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfgExpected.ConsistencyCheckPanicOnFailure = true
-	if err := os.Setenv("COCKROACH_TIME_UNTIL_STORE_DEAD", "10ms"); err != nil {
-		t.Fatal(err)
-	}
-	cfgExpected.TimeUntilStoreDead = time.Millisecond * 10
 
 	envutil.ClearEnvCache()
 	cfg.readEnvironmentVariables()
@@ -171,7 +160,6 @@ func TestReadEnvironmentVariables(t *testing.T) {
 
 	for _, envVar := range []string{
 		"COCKROACH_LINEARIZABLE",
-		"COCKROACH_MAX_OFFSET",
 		"COCKROACH_METRICS_SAMPLE_INTERVAL",
 		"COCKROACH_SCAN_INTERVAL",
 		"COCKROACH_SCAN_MAX_IDLE_TIME",

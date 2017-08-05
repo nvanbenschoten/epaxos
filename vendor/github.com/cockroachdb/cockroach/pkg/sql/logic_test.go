@@ -223,7 +223,7 @@ type testClusterConfig struct {
 	numNodes            int
 	useFakeSpanResolver bool
 	// if non-empty, overrides the default distsql mode.
-	defaultDistSQLMode string
+	overrideDistSQLMode string
 	// if set, any logic statement expected to succeed and parallelizable
 	// using RETURNING NOTHING syntax will be parallelized transparently.
 	// See logicStatement.parallelizeStmts.
@@ -237,10 +237,10 @@ type testClusterConfig struct {
 // If no configs are indicated, the default one is used (unless overridden
 // via -config).
 var logicTestConfigs = []testClusterConfig{
-	{name: "default", numNodes: 1},
-	{name: "parallel-stmts", numNodes: 1, parallelStmts: true},
-	{name: "distsql", numNodes: 3, useFakeSpanResolver: true, defaultDistSQLMode: "ON"},
-	{name: "5node", numNodes: 5},
+	{name: "default", numNodes: 1, overrideDistSQLMode: "Off"},
+	{name: "parallel-stmts", numNodes: 1, parallelStmts: true, overrideDistSQLMode: "Off"},
+	{name: "distsql", numNodes: 3, useFakeSpanResolver: true, overrideDistSQLMode: "On"},
+	{name: "5node", numNodes: 5, overrideDistSQLMode: "Off"},
 }
 
 // An index in the above slice.
@@ -525,14 +525,9 @@ type logicTest struct {
 	// been marked using a result label in the input. See the
 	// explanation for labels in processInputFiles().
 	labelMap map[string]string
-
-	// logScope binds the lifetime of the log files to this test.
-	logScope *log.TestLogScope
 }
 
 func (t *logicTest) close() {
-	defer t.logScope.Close(t.t)
-
 	t.traceStop()
 
 	for _, cleanup := range t.cleanupFuncs {
@@ -614,9 +609,9 @@ func (t *logicTest) setUser(user string) func() {
 	return cleanupFunc
 }
 
-func (t *logicTest) setup(numNodes int, useFakeSpanResolver bool) {
-	t.logScope = log.Scope(t.t)
-
+func (t *logicTest) setup(
+	numNodes int, useFakeSpanResolver bool, distSQLOverride *settings.EnumSetting,
+) {
 	// TODO(pmattis): Add a flag to make it easy to run the tests against a local
 	// MySQL or Postgres instance.
 	// TODO(andrei): if createTestServerParams() is used here, the command filter
@@ -625,10 +620,14 @@ func (t *logicTest) setup(numNodes int, useFakeSpanResolver bool) {
 	// "testdata/rename_table". Figure out what's up with that.
 	params := base.TestClusterArgs{
 		ServerArgs: base.TestServerArgs{
+			// Specify a fixed memory limit (some test cases verify OOM conditions; we
+			// don't want those to take long on large machines).
+			SQLMemoryPoolSize: 128 * 1024 * 1024,
 			Knobs: base.TestingKnobs{
 				SQLExecutor: &sql.ExecutorTestingKnobs{
 					WaitForGossipUpdate:   true,
 					CheckStmtStringChange: true,
+					OverrideDistSQLMode:   distSQLOverride,
 				},
 			},
 		},
@@ -1321,9 +1320,8 @@ func (t *logicTest) success(file string) {
 	}
 }
 
-func (t *logicTest) setupAndRunFile(path string, config testClusterConfig) {
+func (t *logicTest) runFile(path string, config testClusterConfig) {
 	defer t.close()
-	t.setup(config.numNodes, config.useFakeSpanResolver)
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -1332,19 +1330,10 @@ func (t *logicTest) setupAndRunFile(path string, config testClusterConfig) {
 		}
 	}()
 
-	t.logScope.KeepLogs(true)
-
 	if err := t.processTestFile(path, config); err != nil {
 		t.Fatal(err)
 	}
-
-	// If we got this far, we don't need to keep logs (unless the test fails).
-	t.logScope.KeepLogs(false)
 }
-
-// Needed for settings logic tests.
-var _ = settings.RegisterStringSetting("testing.str", "", "<default>")
-var _ = settings.RegisterIntSetting("testing.int", "", 1)
 
 func TestLogic(t *testing.T) {
 	defer leaktest.AfterTest(t)()
@@ -1408,9 +1397,9 @@ func TestLogic(t *testing.T) {
 		t.Fatalf("No testfiles found (globs: %v)", globs)
 	}
 
-	// We want to collect SQL perstatement statistics in tests,
+	// We want to collect SQL per-statement statistics in tests,
 	// regardless of what the environment / config says.
-	sql.StmtStatsEnable = true
+	defer settings.TestingSetBool(&sql.StmtStatsEnable, true)()
 
 	// mu protects the following vars, which all get updated from within the
 	// possibly parallel subtests.
@@ -1432,15 +1421,17 @@ func TestLogic(t *testing.T) {
 		}
 	}
 
+	// The tests below are likely to run concurrently; `log` is shared
+	// between all the goroutines and thus all tests, so it doesn't make
+	// sense to try to use separate `log.Scope` instances for each test.
+	logScope := log.Scope(t)
+	defer logScope.Close(t)
+
 	verbose := testing.Verbose() || log.V(1)
 	for idx, cfg := range logicTestConfigs {
 		paths := configPaths[idx]
 		if len(paths) == 0 {
 			continue
-		}
-		var cleanupFuncs []func()
-		if cfg.defaultDistSQLMode != "" {
-			cleanupFuncs = append(cleanupFuncs, sql.SetDefaultDistSQLMode(cfg.defaultDistSQLMode))
 		}
 		// Top-level test: one per test configuration.
 		t.Run(cfg.name, func(t *testing.T) {
@@ -1453,7 +1444,7 @@ func TestLogic(t *testing.T) {
 						// tests in parallel.
 						// Skip parallelizing tests that use the kv-batch-size directive since
 						// the batch size is a global variable.
-						// TODO(jordan, radu) make sqlbase.kvBatchSize non-global to fix this.
+						// TODO(jordan, radu): make sqlbase.kvBatchSize non-global to fix this.
 						if filepath.Base(path) != "select_index_span_ranges" {
 							t.Parallel()
 						}
@@ -1466,7 +1457,13 @@ func TestLogic(t *testing.T) {
 					if *printErrorSummary {
 						defer lt.printErrorSummary()
 					}
-					lt.setupAndRunFile(path, cfg)
+					var distSQLOverrideEnum *settings.EnumSetting
+					if cfg.overrideDistSQLMode != "" {
+						distSQLOverrideEnum = &settings.EnumSetting{}
+						settings.TestingSetEnum(&distSQLOverrideEnum, int64(sql.DistSQLExecModeFromString(cfg.overrideDistSQLMode)))
+					}
+					lt.setup(cfg.numNodes, cfg.useFakeSpanResolver, distSQLOverrideEnum)
+					lt.runFile(path, cfg)
 
 					progress.Lock()
 					defer progress.Unlock()
@@ -1481,9 +1478,6 @@ func TestLogic(t *testing.T) {
 				})
 			}
 		})
-		for _, cleanupFunc := range cleanupFuncs {
-			cleanupFunc()
-		}
 	}
 
 	unsupportedMsg := ""

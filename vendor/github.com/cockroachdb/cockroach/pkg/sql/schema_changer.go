@@ -34,6 +34,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/distsqlrun"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
@@ -56,7 +57,6 @@ type SchemaChanger struct {
 	nodeID     roachpb.NodeID
 	db         client.DB
 	leaseMgr   *LeaseManager
-	evalCtx    parser.EvalContext
 	// The SchemaChangeManager can attempt to execute this schema
 	// changer after this time.
 	execAfter      time.Time
@@ -287,7 +287,7 @@ func (sc *SchemaChanger) maybeAddDropRename(
 }
 
 // Execute the entire schema change in steps.
-func (sc *SchemaChanger) exec(ctx context.Context) error {
+func (sc *SchemaChanger) exec(ctx context.Context, evalCtx parser.EvalContext) error {
 	// Acquire lease.
 	lease, err := sc.AcquireLease(ctx)
 	if err != nil {
@@ -337,7 +337,7 @@ func (sc *SchemaChanger) exec(ctx context.Context) error {
 	// but we're no longer responsible for taking care of that.
 
 	// Run through mutation state machine and backfill.
-	err = sc.runStateMachineAndBackfill(ctx, &lease)
+	err = sc.runStateMachineAndBackfill(ctx, &lease, evalCtx)
 
 	// Purge the mutations if the application of the mutations failed due to
 	// a permanent error. All other errors are transient errors that are
@@ -354,7 +354,7 @@ func (sc *SchemaChanger) exec(ctx context.Context) error {
 
 		// After this point the schema change has been reversed and any retry
 		// of the schema change will act upon the reversed schema change.
-		if errPurge := sc.runStateMachineAndBackfill(ctx, &lease); errPurge != nil {
+		if errPurge := sc.runStateMachineAndBackfill(ctx, &lease, evalCtx); errPurge != nil {
 			// Don't return this error because we do want the caller to know
 			// that an integrity constraint was violated with the original
 			// schema change. The reversed schema change will be
@@ -488,7 +488,7 @@ func (sc *SchemaChanger) done(ctx context.Context) (*sqlbase.Descriptor, error) 
 			txn,
 			EventLogFinishSchemaChange,
 			int32(sc.tableID),
-			int32(sc.evalCtx.NodeID),
+			int32(sc.nodeID),
 			struct {
 				MutationID uint32
 			}{uint32(sc.mutationID)},
@@ -499,7 +499,7 @@ func (sc *SchemaChanger) done(ctx context.Context) (*sqlbase.Descriptor, error) 
 // runStateMachineAndBackfill runs the schema change state machine followed by
 // the backfill.
 func (sc *SchemaChanger) runStateMachineAndBackfill(
-	ctx context.Context, lease *sqlbase.TableDescriptor_SchemaChangeLease,
+	ctx context.Context, lease *sqlbase.TableDescriptor_SchemaChangeLease, evalCtx parser.EvalContext,
 ) error {
 	// Run through mutation state machine before backfill.
 	if err := sc.RunStateMachineBeforeBackfill(ctx); err != nil {
@@ -507,7 +507,7 @@ func (sc *SchemaChanger) runStateMachineAndBackfill(
 	}
 
 	// Run backfill.
-	if err := sc.runBackfill(ctx, lease); err != nil {
+	if err := sc.runBackfill(ctx, lease, evalCtx); err != nil {
 		return err
 	}
 
@@ -564,7 +564,7 @@ func (sc *SchemaChanger) reverseMutations(ctx context.Context, causingError erro
 			txn,
 			EventLogReverseSchemaChange,
 			int32(sc.tableID),
-			int32(sc.evalCtx.NodeID),
+			int32(sc.nodeID),
 			struct {
 				Error      string
 				MutationID uint32
@@ -703,6 +703,7 @@ type SchemaChangeManager struct {
 	// Create a schema changer for every outstanding schema change seen.
 	schemaChangers map[sqlbase.ID]SchemaChanger
 	distSQLPlanner *distSQLPlanner
+	clock          *hlc.Clock
 }
 
 // NewSchemaChangeManager returns a new SchemaChangeManager.
@@ -715,6 +716,7 @@ func NewSchemaChangeManager(
 	distSender *kv.DistSender,
 	gossip *gossip.Gossip,
 	leaseMgr *LeaseManager,
+	clock *hlc.Clock,
 ) *SchemaChangeManager {
 	return &SchemaChangeManager{
 		db:             db,
@@ -725,6 +727,7 @@ func NewSchemaChangeManager(
 		distSQLPlanner: newDistSQLPlanner(
 			nodeDesc, rpcContext, distSQLServ, distSender, gossip, leaseMgr.stopper,
 		),
+		clock: clock,
 	}
 }
 
@@ -851,8 +854,10 @@ func (s *SchemaChangeManager) Start(stopper *stop.Stopper) {
 				}
 				for tableID, sc := range s.schemaChangers {
 					if timeutil.Since(sc.execAfter) > 0 {
+						evalCtx := createSchemaChangeEvalCtx(s.clock.Now())
+
 						// TODO(andrei): create a proper ctx for executing schema changes.
-						if err := sc.exec(ctx); err != nil {
+						if err := sc.exec(ctx, evalCtx); err != nil {
 							if err != errExistingSchemaChangeLease {
 								log.Warningf(ctx, "Error executing schema change: %s", err)
 							}
@@ -877,4 +882,38 @@ func (s *SchemaChangeManager) Start(stopper *stop.Stopper) {
 			}
 		}
 	})
+}
+
+// createSchemaChangeEvalCtx creates an EvalContext to be used for backfills.
+//
+// TODO(andrei): This EvalContext will be broken for backfills trying to use
+// functions marked with distsqlBlacklist.
+func createSchemaChangeEvalCtx(ts hlc.Timestamp) parser.EvalContext {
+	dummyLocation := time.UTC
+	evalCtx := parser.EvalContext{
+		SearchPath: sqlbase.DefaultSearchPath,
+		Location:   &dummyLocation,
+		// The database is not supposed to be needed in schema changes, as there
+		// shouldn't be unqualified identifiers in backfills, and the pure functions
+		// that need it should have already been evaluated.
+		//
+		// TODO(andrei): find a way to assert that this field is indeed not used.
+		// And in fact it is used by `current_schemas()`, which, although is a pure
+		// function, takes arguments which might be impure (so it can't always be
+		// pre-evaluated).
+		Database: "",
+	}
+	// The backfill is going to use the current timestamp for the various
+	// functions, like now(), that need it.  It's possible that the backfill has
+	// been partially performed already by another SchemaChangeManager with
+	// another timestamp.
+	//
+	// TODO(andrei): Figure out if this is what we want, and whether the
+	// timestamp from the session that enqueued the schema change
+	// is/should be used for impure functions like now().
+	evalCtx.SetTxnTimestamp(time.Unix(0 /* sec */, ts.WallTime))
+	evalCtx.SetStmtTimestamp(time.Unix(0 /* sec */, ts.WallTime))
+	evalCtx.SetClusterTimestamp(ts)
+
+	return evalCtx
 }

@@ -115,7 +115,7 @@ func runInDB(p *planner, tempDB string, f func() error) error {
 func queryInfoSchema(
 	ctx context.Context,
 	p *planner,
-	columns ResultColumns,
+	columns sqlbase.ResultColumns,
 	db string,
 	sql string,
 	args ...interface{},
@@ -140,12 +140,12 @@ func queryInfoSchema(
 }
 
 func (p *planner) showClusterSetting(name string) (planNode, error) {
-	var columns ResultColumns
+	var columns sqlbase.ResultColumns
 	var populate func(ctx context.Context, v *valuesNode) error
 
 	switch name {
 	case "all":
-		columns = ResultColumns{
+		columns = sqlbase.ResultColumns{
 			{Name: "name", Typ: parser.TypeString},
 			{Name: "current_value", Typ: parser.TypeString},
 			{Name: "type", Typ: parser.TypeString},
@@ -183,12 +183,14 @@ func (p *planner) showClusterSetting(name string) (planNode, error) {
 			d = parser.NewDFloat(parser.DFloat(s.Get()))
 		case *settings.DurationSetting:
 			d = &parser.DInterval{Duration: duration.Duration{Nanos: s.Get().Nanoseconds()}}
+		case *settings.EnumSetting:
+			d = parser.NewDInt(parser.DInt(s.Get()))
 		case *settings.ByteSizeSetting:
 			d = parser.NewDString(s.String())
 		default:
 			return nil, errors.Errorf("unknown setting type for %s: %s", name, val.Typ())
 		}
-		columns = ResultColumns{{Name: name, Typ: d.ResolvedType()}}
+		columns = sqlbase.ResultColumns{{Name: name, Typ: d.ResolvedType()}}
 		populate = func(ctx context.Context, v *valuesNode) error {
 			_, err := v.rows.AddRow(ctx, parser.Datums{d})
 			return err
@@ -219,11 +221,11 @@ func (p *planner) Show(n *parser.Show) (planNode, error) {
 		return p.showClusterSetting(name)
 	}
 
-	var columns ResultColumns
+	var columns sqlbase.ResultColumns
 
 	switch name {
 	case `all`:
-		columns = ResultColumns{
+		columns = sqlbase.ResultColumns{
 			{Name: "Variable", Typ: parser.TypeString},
 			{Name: "Value", Typ: parser.TypeString},
 		}
@@ -231,7 +233,7 @@ func (p *planner) Show(n *parser.Show) (planNode, error) {
 		if _, ok := varGen[name]; !ok {
 			return nil, fmt.Errorf("unknown variable: %q", origName)
 		}
-		columns = ResultColumns{{Name: name, Typ: parser.TypeString}}
+		columns = sqlbase.ResultColumns{{Name: name, Typ: parser.TypeString}}
 	}
 
 	return &delayedNode{
@@ -278,7 +280,7 @@ func (p *planner) ShowColumns(ctx context.Context, n *parser.ShowColumns) (planN
 		return nil, err
 	}
 
-	columns := ResultColumns{
+	columns := sqlbase.ResultColumns{
 		{Name: "Field", Typ: parser.TypeString},
 		{Name: "Type", Typ: parser.TypeString},
 		{Name: "Null", Typ: parser.TypeBool},
@@ -348,7 +350,7 @@ func (p *planner) showCreateInterleave(
 		sharedPrefixLen += int(ancestor.SharedPrefixLen)
 	}
 	interleavedColumnNames := quoteNames(idx.ColumnNames[:sharedPrefixLen]...)
-	s := fmt.Sprintf(" INTERLEAVE IN PARENT %s (%s)", parentTable.Name, interleavedColumnNames)
+	s := fmt.Sprintf(" INTERLEAVE IN PARENT %s (%s)", parser.Name(parentTable.Name), interleavedColumnNames)
 	return s, nil
 }
 
@@ -370,7 +372,7 @@ func (p *planner) ShowCreateTable(
 		return nil, err
 	}
 
-	columns := ResultColumns{
+	columns := sqlbase.ResultColumns{
 		{Name: "Table", Typ: parser.TypeString},
 		{Name: "CreateTable", Typ: parser.TypeString},
 	}
@@ -532,7 +534,7 @@ func (p *planner) ShowCreateView(ctx context.Context, n *parser.ShowCreateView) 
 		return nil, err
 	}
 
-	columns := ResultColumns{
+	columns := sqlbase.ResultColumns{
 		{Name: "View", Typ: parser.TypeString},
 		{Name: "CreateView", Typ: parser.TypeString},
 	}
@@ -562,7 +564,7 @@ func (p *planner) ShowCreateView(ctx context.Context, n *parser.ShowCreateView) 
 			p.skipSelectPrivilegeChecks = true
 			defer func() { p.skipSelectPrivilegeChecks = false }()
 
-			sourcePlan, err := p.Select(ctx, sel, []parser.Type{}, false)
+			sourcePlan, err := p.Select(ctx, sel, []parser.Type{})
 			if err != nil {
 				return nil, err
 			}
@@ -573,11 +575,14 @@ func (p *planner) ShowCreateView(ctx context.Context, n *parser.ShowCreateView) 
 				}
 			}
 			if customColNames {
-				colNames := make([]string, 0, len(desc.Columns))
-				for _, col := range desc.Columns {
-					colNames = append(colNames, col.Name)
+				buf.WriteByte('(')
+				for i, col := range desc.Columns {
+					if i > 0 {
+						buf.WriteString(", ")
+					}
+					parser.Name(col.Name).Format(&buf, parser.FmtSimple)
 				}
-				fmt.Fprintf(&buf, "(%s) ", strings.Join(colNames, ", "))
+				buf.WriteString(") ")
 			}
 
 			fmt.Fprintf(&buf, "AS %s", desc.ViewQuery)
@@ -604,7 +609,7 @@ func (p *planner) ShowDatabases(ctx context.Context, n *parser.ShowDatabases) (p
 	if err != nil {
 		return nil, err
 	}
-	return p.newPlan(ctx, stmt, nil, true)
+	return p.newPlan(ctx, stmt, nil)
 }
 
 // ShowGrants returns grant details for the specified objects and users.
@@ -622,7 +627,7 @@ func (p *planner) ShowGrants(ctx context.Context, n *parser.ShowGrants) (planNod
 		objectType = "Table"
 	}
 
-	columns := ResultColumns{
+	columns := sqlbase.ResultColumns{
 		{Name: objectType, Typ: parser.TypeString},
 		{Name: "User", Typ: parser.TypeString},
 		{Name: "Privileges", Typ: parser.TypeString},
@@ -755,7 +760,7 @@ func (p *planner) ShowIndex(ctx context.Context, n *parser.ShowIndex) (planNode,
 		return nil, err
 	}
 
-	columns := ResultColumns{
+	columns := sqlbase.ResultColumns{
 		{Name: "Table", Typ: parser.TypeString},
 		{Name: "Name", Typ: parser.TypeString},
 		{Name: "Unique", Typ: parser.TypeBool},
@@ -822,7 +827,7 @@ func (p *planner) ShowConstraints(
 		return nil, err
 	}
 
-	columns := ResultColumns{
+	columns := sqlbase.ResultColumns{
 		{Name: "Table", Typ: parser.TypeString},
 		{Name: "Name", Typ: parser.TypeString},
 		{Name: "Type", Typ: parser.TypeString},
@@ -893,7 +898,7 @@ func (p *planner) ShowTables(ctx context.Context, n *parser.ShowTables) (planNod
 		return nil, errNoDatabase
 	}
 
-	columns := ResultColumns{{Name: "Table", Typ: parser.TypeString}}
+	columns := sqlbase.ResultColumns{{Name: "Table", Typ: parser.TypeString}}
 	return &delayedNode{
 		name:    "SHOW TABLES FROM " + name,
 		columns: columns,
@@ -920,14 +925,14 @@ func (p *planner) ShowUsers(ctx context.Context, n *parser.ShowUsers) (planNode,
 	if err != nil {
 		return nil, err
 	}
-	return p.newPlan(ctx, stmt, nil, true)
+	return p.newPlan(ctx, stmt, nil)
 }
 
 // Help returns usage information for the builtin functions
 // Privileges: None
 func (p *planner) Help(ctx context.Context, n *parser.Help) (planNode, error) {
 	name := strings.ToLower(n.Name.String())
-	columns := ResultColumns{
+	columns := sqlbase.ResultColumns{
 		{Name: "Function", Typ: parser.TypeString},
 		{Name: "Signature", Typ: parser.TypeString},
 		{Name: "Category", Typ: parser.TypeString},

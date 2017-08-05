@@ -934,8 +934,7 @@ func TestReplicateAfterRemoveAndSplit(t *testing.T) {
 		)
 	}
 
-	expected := "snapshot intersects existing range"
-	if err := replicateRHS(); !testutils.IsError(err, expected) {
+	if err := replicateRHS(); !testutils.IsError(err, storage.IntersectingSnapshotMsg) {
 		t.Fatalf("unexpected error %v", err)
 	}
 
@@ -2248,11 +2247,15 @@ func TestStoreRangeRemoveDead(t *testing.T) {
 	mtc := &multiTestContext{}
 	mtc.timeUntilStoreDead = storage.TestTimeUntilStoreDead
 	defer mtc.Stop()
-	mtc.Start(t, 3)
+	mtc.Start(t, 4)
 
-	// Replicate the range to all stores.
+	// Replicate the range to 2 more stores. Note that there are 4 stores in the
+	// cluster leaving an extra store available as a replication target once the
+	// replica on the dead node is removed.
 	replica := mtc.stores[0].LookupReplica(roachpb.RKeyMin, nil)
-	mtc.replicateRange(replica.RangeID, 1, 2)
+	mtc.replicateRange(replica.RangeID, 1, 3)
+
+	origReplicas := getRangeMetadata(roachpb.RKeyMin, mtc, t).Replicas
 
 	for _, s := range mtc.stores {
 		if err := s.GossipStore(context.Background()); err != nil {
@@ -2275,7 +2278,14 @@ func TestStoreRangeRemoveDead(t *testing.T) {
 	maxTime := 5 * time.Second
 	maxTimeout := time.After(maxTime)
 
-	for len(getRangeMetadata(roachpb.RKeyMin, mtc, t).Replicas) > 2 {
+	for {
+		// Wait for the replica on the dead node to be removed and the replacement
+		// added.
+		curReplicas := getRangeMetadata(roachpb.RKeyMin, mtc, t).Replicas
+		if len(curReplicas) == 3 && !reflect.DeepEqual(origReplicas, curReplicas) {
+			break
+		}
+
 		select {
 		case <-maxTimeout:
 			t.Fatalf("Failed to remove the dead replica within %s", maxTime)
@@ -2283,16 +2293,16 @@ func TestStoreRangeRemoveDead(t *testing.T) {
 			mtc.manualClock.Increment(int64(tickerDur))
 
 			// Keep gossiping the alive stores.
-			if err := mtc.stores[0].GossipStore(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-			if err := mtc.stores[1].GossipStore(context.Background()); err != nil {
-				t.Fatal(err)
+			for _, s := range mtc.stores[:3] {
+				if err := s.GossipStore(context.Background()); err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			// Force the repair queues on all alive stores to run.
-			mtc.stores[0].ForceReplicationScanAndProcess()
-			mtc.stores[1].ForceReplicationScanAndProcess()
+			for _, s := range mtc.stores[:3] {
+				s.ForceReplicationScanAndProcess()
+			}
 		}
 	}
 }
@@ -2868,7 +2878,7 @@ func TestRemoveRangeWithoutGC(t *testing.T) {
 
 	testutils.SucceedsSoon(t, func() error {
 		// The Replica object should be removed.
-		if _, err := mtc.stores[0].GetReplica(rangeID); !testutils.IsError(err, "range [0-9]+ was not found") {
+		if _, err := mtc.stores[0].GetReplica(rangeID); !testutils.IsError(err, "r[0-9]+ was not found") {
 			return errors.Errorf("expected replica to be missing; got %v", err)
 		}
 

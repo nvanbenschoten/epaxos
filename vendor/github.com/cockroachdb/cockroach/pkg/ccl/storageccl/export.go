@@ -28,6 +28,17 @@ import (
 	"github.com/pkg/errors"
 )
 
+// ExportRequestLimit is the number of Export requests that can run at once.
+// Each extracts data from RocksDB to a temp file and then uploads it to cloud
+// storage. In order to not exhaust the disk or memory, or saturate the network,
+// limit the number of these that can be run in parallel. This number was chosen
+// by a guess. If SST files are likely to not be over 200MB, then 5 parallel
+// workers hopefully won't use more than 1GB of space in the temp directory. It
+// could be improved by more measured heuristics.
+const ExportRequestLimit = 5
+
+var exportRequestLimiter = makeConcurrentRequestLimiter(ExportRequestLimit)
+
 func init() {
 	storage.SetExportCmd(storage.Command{
 		DeclareKeys: declareKeysExport,
@@ -46,7 +57,7 @@ func declareKeysExport(
 // in a format suitable for bulk ingest.
 func evalExport(
 	ctx context.Context, batch engine.ReadWriter, cArgs storage.CommandArgs, resp roachpb.Response,
-) (pd storage.EvalResult, retErr error) {
+) (storage.EvalResult, error) {
 	args := cArgs.Args.(*roachpb.ExportRequest)
 	h := cArgs.Header
 	reply := resp.(*roachpb.ExportResponse)
@@ -69,10 +80,10 @@ func evalExport(
 		}
 	}
 
-	if err := beginLimitedRequest(ctx); err != nil {
+	if err := exportRequestLimiter.beginLimitedRequest(ctx); err != nil {
 		return storage.EvalResult{}, err
 	}
-	defer endLimitedRequest()
+	defer exportRequestLimiter.endLimitedRequest()
 	log.Infof(ctx, "export [%s,%s)", args.Key, args.EndKey)
 
 	exportStore, err := MakeExportStorage(ctx, args.Storage)
@@ -89,22 +100,21 @@ func evalExport(
 	localPath := temp.LocalFile()
 	defer temp.Close(ctx)
 
-	sstWriter := engine.MakeRocksDBSstFileWriter()
-	sst := &sstWriter
+	sst := engine.MakeRocksDBSstFileWriter()
 	if err := sst.Open(localPath); err != nil {
 		return storage.EvalResult{}, err
 	}
 	defer func() {
-		if sst != nil {
-			if closeErr := sst.Close(); closeErr != nil {
-				log.Warningf(ctx, "could not close sst writer %s: %+v", localPath, closeErr)
-			}
+		// Close is idempotent, so it's safe to call it again in the success
+		// path. If the sstable was empty, ignore the error because empty
+		// sstables are not allowed.
+		if err := sst.Close(); sst.DataSize > 0 && err != nil {
+			log.Warningf(ctx, "could not close sst writer %s: %+v", localPath, err)
 		}
 	}()
 
 	// TODO(dan): Move all this iteration into cpp to avoid the cgo calls.
 	// TODO(dan): Consider checking ctx periodically during the MVCCIterate call.
-	var entries int64
 	iter := engineccl.NewMVCCIncrementalIterator(batch)
 	defer iter.Close()
 	iter.Reset(args.Key, args.EndKey, args.StartTime, h.Timestamp)
@@ -113,7 +123,6 @@ func evalExport(
 			v := roachpb.Value{RawBytes: iter.UnsafeValue()}
 			log.Infof(ctx, "Export %s %s", iter.UnsafeKey(), v.PrettyPrint())
 		}
-		entries++
 		if err := sst.Add(engine.MVCCKeyValue{Key: iter.UnsafeKey(), Value: iter.UnsafeValue()}); err != nil {
 			return storage.EvalResult{}, errors.Wrapf(err, "adding key %s", iter.UnsafeKey())
 		}
@@ -124,12 +133,8 @@ func evalExport(
 		return storage.EvalResult{}, err
 	}
 
-	if entries == 0 {
-		// The defer above `Close`s sst if it's not nil, which in turn finishes
-		// the SSTable. However, our SSTable library errors if there is not at
-		// least one entry, so set `sst = nil` to avoid the `Close` and the log
-		// spam when it fails.
-		sst = nil
+	if sst.DataSize == 0 {
+		// Let the defer Close the sstable.
 		reply.Files = []roachpb.ExportResponse_File{}
 		return storage.EvalResult{}, nil
 	}
@@ -138,7 +143,6 @@ func evalExport(
 		return storage.EvalResult{}, err
 	}
 	size := sst.DataSize
-	sst = nil
 
 	// Compute the checksum before we upload and remove the local file.
 	checksum, err := sha512ChecksumFile(localPath)

@@ -35,14 +35,13 @@ import (
 // editNodeBase holds the common (prepare+execute) state needed to run
 // row-modifying statements.
 type editNodeBase struct {
-	p          *planner
-	rh         *returningHelper
-	tableDesc  *sqlbase.TableDescriptor
-	autoCommit bool
+	p         *planner
+	rh        *returningHelper
+	tableDesc *sqlbase.TableDescriptor
 }
 
 func (p *planner) makeEditNode(
-	ctx context.Context, tn *parser.TableName, autoCommit bool, priv privilege.Kind,
+	ctx context.Context, tn *parser.TableName, priv privilege.Kind,
 ) (editNodeBase, error) {
 	tableDesc, err := p.session.leases.getTableLease(ctx, p.txn, p.getVirtualTabler(), tn)
 	if err != nil {
@@ -59,9 +58,8 @@ func (p *planner) makeEditNode(
 	}
 
 	return editNodeBase{
-		p:          p,
-		tableDesc:  tableDesc,
-		autoCommit: autoCommit,
+		p:         p,
+		tableDesc: tableDesc,
 	}, nil
 }
 
@@ -114,7 +112,7 @@ func (r *editNodeRun) collectSpans(ctx context.Context) (reads, writes roachpb.S
 	if len(scanWrites) > 0 {
 		return nil, nil, errors.Errorf("unexpected scan span writes: %v", scanWrites)
 	}
-	// TODO(nvanbenschoten) if we notice that r.rows is a ValuesClause, we
+	// TODO(nvanbenschoten): if we notice that r.rows is a ValuesClause, we
 	// may be able to contrain the tableWriter Spans.
 	writerReads, writerWrites, err := r.tw.spans()
 	if err != nil {
@@ -209,7 +207,7 @@ func addOrMergeExpr(
 	selectExpr := parser.SelectExpr{Expr: e}
 	typ := updateCols[currentUpdateIdx].Type.ToDatumType()
 	col, expr, err := render.planner.computeRender(ctx, selectExpr, typ,
-		render.sourceInfo, render.ivarHelper)
+		render.sourceInfo, render.ivarHelper, autoGenerateRenderOutputName)
 	if err != nil {
 		return -1, err
 	}
@@ -223,7 +221,7 @@ func addOrMergeExpr(
 //          mysql requires UPDATE. Also requires SELECT with WHERE clause with table.
 // TODO(guanqun): need to support CHECK in UPDATE
 func (p *planner) Update(
-	ctx context.Context, n *parser.Update, desiredTypes []parser.Type, autoCommit bool,
+	ctx context.Context, n *parser.Update, desiredTypes []parser.Type,
 ) (planNode, error) {
 	tracing.AnnotateTrace()
 
@@ -232,7 +230,7 @@ func (p *planner) Update(
 		return nil, err
 	}
 
-	en, err := p.makeEditNode(ctx, tn, autoCommit, privilege.UPDATE)
+	en, err := p.makeEditNode(ctx, tn, privilege.UPDATE)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +276,7 @@ func (p *planner) Update(
 	if err != nil {
 		return nil, err
 	}
-	tw := tableUpdater{ru: ru, autoCommit: autoCommit}
+	tw := tableUpdater{ru: ru, autoCommit: p.autoCommit}
 
 	tracing.AnnotateTrace()
 
@@ -329,7 +327,7 @@ func (p *planner) Update(
 					desiredTupleType[i] = updateCols[currentUpdateIdx+i].Type.ToDatumType()
 				}
 				col, expr, err := render.planner.computeRender(ctx, selectExpr, desiredTupleType,
-					render.sourceInfo, render.ivarHelper)
+					render.sourceInfo, render.ivarHelper, autoGenerateRenderOutputName)
 				if err != nil {
 					return nil, err
 				}
@@ -516,7 +514,7 @@ func fillDefault(expr parser.Expr, index int, defaultExprs []parser.TypedExpr) p
 	return expr
 }
 
-func (u *updateNode) Columns() ResultColumns {
+func (u *updateNode) Columns() sqlbase.ResultColumns {
 	return u.rh.columns
 }
 

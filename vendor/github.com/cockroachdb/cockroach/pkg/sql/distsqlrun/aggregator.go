@@ -19,6 +19,7 @@ package distsqlrun
 import (
 	"strings"
 	"sync"
+	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/mon"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
@@ -73,7 +74,8 @@ type aggregator struct {
 	funcs       []*aggregateFuncHolder
 	outputTypes []sqlbase.ColumnType
 	datumAlloc  sqlbase.DatumAlloc
-	acc         *mon.MemoryAccount
+
+	bucketsAcc mon.BoundAccount
 
 	groupCols columns
 	inputCols columns
@@ -99,9 +101,8 @@ func newAggregator(
 		funcs:       make([]*aggregateFuncHolder, len(spec.Aggregations)),
 		outputTypes: make([]sqlbase.ColumnType, len(spec.Aggregations)),
 		groupCols:   make(columns, len(spec.GroupCols)),
-		acc:         &mon.MemoryAccount{},
+		bucketsAcc:  flowCtx.evalCtx.Mon.MakeBoundAccount(),
 	}
-	flowCtx.evalCtx.Mon.OpenAccount(ag.acc)
 
 	for i, aggInfo := range spec.Aggregations {
 		ag.inputCols[i] = aggInfo.ColIdx
@@ -139,6 +140,14 @@ func (ag *aggregator) Run(ctx context.Context, wg *sync.WaitGroup) {
 	if wg != nil {
 		defer wg.Done()
 	}
+	defer ag.bucketsAcc.Close(ctx)
+	defer func() {
+		for _, f := range ag.funcs {
+			for _, aggFunc := range f.buckets {
+				aggFunc.Close(ctx)
+			}
+		}
+	}()
 
 	ctx = log.WithLogTag(ctx, "Agg", nil)
 	ctx, span := tracing.ChildSpan(ctx, "aggregator")
@@ -167,7 +176,11 @@ func (ag *aggregator) Run(ctx context.Context, wg *sync.WaitGroup) {
 	row := make(sqlbase.EncDatumRow, len(ag.funcs))
 	for bucket := range ag.buckets {
 		for i, f := range ag.funcs {
-			result := f.get(bucket)
+			result, err := f.get(bucket)
+			if err != nil {
+				DrainAndClose(ctx, ag.out.output, err, ag.input)
+				return
+			}
 			if result == nil {
 				// Special case useful when this is a local stage of a distributed
 				// aggregation.
@@ -196,8 +209,11 @@ func (ag *aggregator) Run(ctx context.Context, wg *sync.WaitGroup) {
 func (ag *aggregator) accumulateRows(ctx context.Context) (err error) {
 	cleanupRequired := true
 	defer func() {
-		if err != nil && cleanupRequired {
-			DrainAndClose(ctx, ag.out.output, err, ag.input)
+		if err != nil {
+			log.Infof(ctx, "accumulate error %s", err)
+			if cleanupRequired {
+				DrainAndClose(ctx, ag.out.output, err, ag.input)
+			}
 		}
 	}()
 
@@ -231,6 +247,10 @@ func (ag *aggregator) accumulateRows(ctx context.Context) (err error) {
 			return err
 		}
 
+		if err := ag.bucketsAcc.Grow(ctx, int64(len(encoded))); err != nil {
+			return err
+		}
+
 		ag.buckets[string(encoded)] = struct{}{}
 		// Feed the func holders for this bucket the non-grouping datums.
 		for i, colIdx := range ag.inputCols {
@@ -246,19 +266,23 @@ func (ag *aggregator) accumulateRows(ctx context.Context) (err error) {
 }
 
 type aggregateFuncHolder struct {
-	create  func(*parser.EvalContext) parser.AggregateFunc
-	group   *aggregator
-	buckets map[string]parser.AggregateFunc
-	seen    map[string]struct{}
+	create        func(*parser.EvalContext) parser.AggregateFunc
+	group         *aggregator
+	buckets       map[string]parser.AggregateFunc
+	seen          map[string]struct{}
+	bucketsMemAcc *mon.BoundAccount
 }
+
+const sizeOfAggregateFunc = int64(unsafe.Sizeof(parser.AggregateFunc(nil)))
 
 func (ag *aggregator) newAggregateFuncHolder(
 	create func(*parser.EvalContext) parser.AggregateFunc,
 ) *aggregateFuncHolder {
 	return &aggregateFuncHolder{
-		create:  create,
-		group:   ag,
-		buckets: make(map[string]parser.AggregateFunc),
+		create:        create,
+		group:         ag,
+		buckets:       make(map[string]parser.AggregateFunc),
+		bucketsMemAcc: &ag.bucketsAcc,
 	}
 }
 
@@ -272,19 +296,32 @@ func (a *aggregateFuncHolder) add(ctx context.Context, bucket []byte, d parser.D
 			// skip
 			return nil
 		}
+		if err := a.bucketsMemAcc.Grow(ctx, int64(len(encoded))); err != nil {
+			return err
+		}
 		a.seen[string(encoded)] = struct{}{}
 	}
 
 	impl, ok := a.buckets[string(bucket)]
 	if !ok {
+		// TODO(radu): we should account for the size of impl (this needs to be done
+		// in each aggregate constructor).
 		impl = a.create(&a.group.flowCtx.evalCtx)
+		usage := int64(len(bucket))
+		usage += sizeOfAggregateFunc
+		// TODO(radu): this model of each func having a map of buckets (one per
+		// group) for each func plus a global map is very wasteful. We should have a
+		// single map that stores all the AggregateFuncs.
+		if err := a.bucketsMemAcc.Grow(ctx, usage); err != nil {
+			return err
+		}
 		a.buckets[string(bucket)] = impl
 	}
 
 	return impl.Add(ctx, d)
 }
 
-func (a *aggregateFuncHolder) get(bucket string) parser.Datum {
+func (a *aggregateFuncHolder) get(bucket string) (parser.Datum, error) {
 	found, ok := a.buckets[bucket]
 	if !ok {
 		found = a.create(&a.group.flowCtx.evalCtx)

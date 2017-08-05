@@ -238,7 +238,7 @@ func init() {
 		varFlag(f, &serverCfg.Locality, cliflags.Locality)
 
 		varFlag(f, &serverCfg.Stores, cliflags.Store)
-		durationFlag(f, &serverCfg.RaftTickInterval, cliflags.RaftTickInterval, base.DefaultRaftTickInterval)
+		durationFlag(f, &serverCfg.MaxOffset, cliflags.MaxOffset, base.DefaultMaxClockOffset)
 
 		// Usage for the unix socket is odd as we use a real file, whereas
 		// postgresql and clients consider it a directory and build a filename
@@ -246,6 +246,8 @@ func init() {
 		// Thus, we keep it hidden and use it for testing only.
 		stringFlag(f, &serverCfg.SocketFile, cliflags.Socket, "")
 		_ = f.MarkHidden(cliflags.Socket.Name)
+
+		stringFlag(f, &serverCfg.ListeningURLFile, cliflags.ListeningURLFile, "")
 
 		stringFlag(f, &serverCfg.PIDFile, cliflags.PIDFile, "")
 

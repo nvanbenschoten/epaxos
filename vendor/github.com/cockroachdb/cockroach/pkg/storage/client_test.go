@@ -50,6 +50,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
@@ -512,6 +513,13 @@ func (t *multiTestContextKVTransport) SendNext(ctx context.Context, done chan<- 
 	}
 }
 
+func (t *multiTestContextKVTransport) NextReplica() roachpb.ReplicaDescriptor {
+	if t.IsExhausted() {
+		return roachpb.ReplicaDescriptor{}
+	}
+	return t.replicas[t.idx].ReplicaDescriptor
+}
+
 func (t *multiTestContextKVTransport) MoveToFront(replica roachpb.ReplicaDescriptor) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -659,7 +667,7 @@ func (m *multiTestContext) populateStorePool(idx int, nodeLiveness *storage.Node
 		m.gossips[idx],
 		m.clock,
 		storage.MakeStorePoolNodeLivenessFunc(nodeLiveness),
-		m.timeUntilStoreDead,
+		settings.TestingDuration(m.timeUntilStoreDead),
 		/* deterministic */ false,
 	)
 }
@@ -995,7 +1003,7 @@ func (m *multiTestContext) changeReplicasLocked(
 		}
 
 		if _, ok := errors.Cause(err).(*roachpb.AmbiguousResultError); ok {
-			// Try again after an AmbigousResultError. If the operation
+			// Try again after an AmbiguousResultError. If the operation
 			// succeeded, then the next attempt will return alreadyDoneErr;
 			// if it failed then the next attempt should succeed.
 			continue

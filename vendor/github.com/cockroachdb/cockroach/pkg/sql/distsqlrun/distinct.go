@@ -19,6 +19,7 @@ package distsqlrun
 import (
 	"sync"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/mon"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
@@ -26,11 +27,13 @@ import (
 )
 
 type distinct struct {
+	flowCtx      *FlowCtx
 	input        RowSource
 	lastGroupKey sqlbase.EncDatumRow
 	seen         map[string]struct{}
 	orderedCols  map[uint32]struct{}
 	distinctCols map[uint32]struct{}
+	memAcc       mon.BoundAccount
 	datumAlloc   sqlbase.DatumAlloc
 	out          procOutputHelper
 }
@@ -41,9 +44,11 @@ func newDistinct(
 	flowCtx *FlowCtx, spec *DistinctSpec, input RowSource, post *PostProcessSpec, output RowReceiver,
 ) (*distinct, error) {
 	d := &distinct{
+		flowCtx:      flowCtx,
 		input:        input,
 		orderedCols:  make(map[uint32]struct{}),
 		distinctCols: make(map[uint32]struct{}),
+		memAcc:       flowCtx.evalCtx.Mon.MakeBoundAccount(),
 	}
 	for _, col := range spec.OrderedColumns {
 		d.orderedCols[col] = struct{}{}
@@ -64,6 +69,7 @@ func (d *distinct) Run(ctx context.Context, wg *sync.WaitGroup) {
 	if wg != nil {
 		defer wg.Done()
 	}
+	defer d.memAcc.Close(ctx)
 
 	ctx = log.WithLogTag(ctx, "Evaluator", nil)
 	ctx, span := tracing.ChildSpan(ctx, "distinct")
@@ -123,12 +129,16 @@ func (d *distinct) Run(ctx context.Context, wg *sync.WaitGroup) {
 		if !matched {
 			d.lastGroupKey = row
 			d.seen = make(map[string]struct{})
+			d.memAcc.Clear(ctx)
 		}
 
-		key := string(encoding)
-		if _, ok := d.seen[key]; !ok {
-			if len(key) > 0 {
-				d.seen[key] = struct{}{}
+		if _, ok := d.seen[string(encoding)]; !ok {
+			if len(encoding) > 0 {
+				if err := d.memAcc.Grow(ctx, int64(len(encoding))); err != nil {
+					cleanup(err)
+					return
+				}
+				d.seen[string(encoding)] = struct{}{}
 			}
 			if !emitHelper(ctx, &d.out, row, ProducerMetadata{}, d.input) {
 				// No cleanup required; emitHelper() took care of it.
@@ -144,7 +154,7 @@ func (d *distinct) matchLastGroupKey(row sqlbase.EncDatumRow) (bool, error) {
 		return false, nil
 	}
 	for colIdx := range d.orderedCols {
-		res, err := d.lastGroupKey[colIdx].Compare(&d.datumAlloc, &row[colIdx])
+		res, err := d.lastGroupKey[colIdx].Compare(&d.datumAlloc, &d.flowCtx.evalCtx, &row[colIdx])
 		if res != 0 || err != nil {
 			return false, err
 		}

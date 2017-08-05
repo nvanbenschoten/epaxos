@@ -40,7 +40,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security/securitytest"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
-	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -450,59 +449,76 @@ func TestPGPrepareWithCreateDropInTxn(t *testing.T) {
 	}
 	defer db.Close()
 
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
+	{
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	if _, err := tx.Exec(`
+		if _, err := tx.Exec(`
 	CREATE DATABASE d;
 	CREATE TABLE d.kv (k CHAR PRIMARY KEY, v CHAR);
 `); err != nil {
-		t.Fatal(err)
+			t.Fatal(err)
+		}
+
+		stmt, err := tx.Prepare(`INSERT INTO d.kv (k,v) VALUES ($1, $2);`)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		res, err := stmt.Exec('a', 'b')
+		if err != nil {
+			t.Fatal(err)
+		}
+		stmt.Close()
+		affected, err := res.RowsAffected()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if affected != 1 {
+			t.Fatalf("unexpected number of rows affected: %d", affected)
+		}
+
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	stmt, err := tx.Prepare(`INSERT INTO d.kv (k,v) VALUES ($1, $2);`)
-	if err != nil {
-		t.Fatal(err)
-	}
+	{
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	res, err := stmt.Exec('a', 'b')
-	if err != nil {
-		t.Fatal(err)
-	}
-	stmt.Close()
-	affected, err := res.RowsAffected()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if affected != 1 {
-		t.Fatalf("unexpected number of rows affected: %d", affected)
-	}
-
-	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
-	}
-
-	tx, err = db.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := tx.Exec(`
+		if _, err := tx.Exec(`
 	DROP TABLE d.kv;
 `); err != nil {
-		t.Fatal(err)
-	}
+			t.Fatal(err)
+		}
 
-	if _, err := tx.Prepare(`
-	INSERT INTO d.kv (k,v) VALUES ($1, $2);
-`); !testutils.IsError(err, "statement cannot follow a schema change in a transaction") {
-		t.Fatalf("got err: %s", err)
-	}
+		stmt, err := tx.Prepare(`INSERT INTO d.kv (k,v) VALUES ($1, $2);`)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	if err := tx.Rollback(); err != nil {
-		t.Fatal(err)
+		// INSERT works because it is using a cached descriptor that is leased.
+		res, err := stmt.Exec('c', 'd')
+		if err != nil {
+			t.Fatal(err)
+		}
+		stmt.Close()
+		affected, err := res.RowsAffected()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if affected != 1 {
+			t.Fatalf("unexpected number of rows affected: %d", affected)
+		}
+
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -817,12 +833,12 @@ func TestPGPreparedQuery(t *testing.T) {
 			baseTest.SetArgs(1),
 		},
 
-		// TODO(jordan) blocked on #13651
+		// TODO(jordan): blocked on #13651
 		//"SELECT $1::INT[]": {
 		//	baseTest.SetArgs(pq.Array([]int{10})).Results(pq.Array([]int{10})),
 		//},
 
-		// TODO(nvanbenschoten) Same class of limitation as that in logic_test/typing:
+		// TODO(nvanbenschoten): Same class of limitation as that in logic_test/typing:
 		//   Nested constants are not exposed to the same constant type resolution rules
 		//   as top-level constants, and instead are simply resolved to their natural type.
 		//"SELECT (CASE a WHEN 10 THEN 'one' WHEN 11 THEN (CASE 'en' WHEN 'en' THEN $1 END) END) AS ret FROM d.T ORDER BY ret DESC LIMIT 2": {
@@ -1091,40 +1107,6 @@ func TestPGPreparedExec(t *testing.T) {
 				),
 			},
 		},
-		// Test for #14473: assert that looking up a table lease for a foreign key
-		// during a prepared update doesn't kill the server. This test requires
-		// the AlwaysAcquireNewLease testing knob be set to true below.
-		{
-			"CREATE TABLE d.t (i INT primary key)",
-			[]preparedExecTest{
-				baseTest,
-			},
-		},
-		{
-			"CREATE TABLE d.u (i INT REFERENCES d.t(i))",
-			[]preparedExecTest{
-				baseTest,
-			},
-		},
-		{
-			"INSERT INTO d.t VALUES($1)",
-			[]preparedExecTest{
-				baseTest.RowsAffected(1).SetArgs(1),
-				baseTest.RowsAffected(1).SetArgs(2),
-			},
-		},
-		{
-			"INSERT INTO d.u VALUES($1)",
-			[]preparedExecTest{
-				baseTest.RowsAffected(1).SetArgs(1),
-			},
-		},
-		{
-			"UPDATE d.u SET i = $1 WHERE i = $2",
-			[]preparedExecTest{
-				baseTest.RowsAffected(1).SetArgs(2, 1),
-			},
-		},
 		{
 			"DROP DATABASE d",
 			[]preparedExecTest{
@@ -1155,27 +1137,8 @@ func TestPGPreparedExec(t *testing.T) {
 		},
 	}
 
-	// Ensure that leases are always acquired fresh to test that table lease
-	// acquiration works properly during PREPARE.
-	testingKnobs := base.TestingKnobs{
-		SQLLeaseManager: &sql.LeaseManagerTestingKnobs{
-			LeaseStoreTestingKnobs: sql.LeaseStoreTestingKnobs{
-				AlwaysAcquireNewLease: true,
-			},
-		},
-	}
-	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{Knobs: testingKnobs})
-
+	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop(context.TODO())
-
-	pgURL, cleanupFn := sqlutils.PGUrl(t, s.ServingAddr(), t.Name(), url.User(security.RootUser))
-	defer cleanupFn()
-
-	db, err := gosql.Open("postgres", pgURL.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
 
 	runTests := func(query string, tests []preparedExecTest, execFunc func(...interface{}) (gosql.Result, error)) {
 		for _, test := range tests {
@@ -1637,4 +1600,41 @@ func TestPGWireAuth(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
+}
+
+func TestPGWireNumResultsChanged(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
+	defer s.Stopper().Stop(context.TODO())
+
+	pgURL, cleanupFn := sqlutils.PGUrl(t, s.ServingAddr(), t.Name(), url.User(security.RootUser))
+	defer cleanupFn()
+
+	db, err := gosql.Open("postgres", pgURL.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE DATABASE testing`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE testing.f (v INT)`); err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := db.Prepare(`SELECT * FROM testing.f`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`ALTER TABLE testing.f ADD COLUMN u int`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO testing.f VALUES (1, 2)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stmt.Exec(); !testutils.IsError(err, "number of results changed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := stmt.Close(); err != nil {
+		t.Fatal(err)
+	}
 }

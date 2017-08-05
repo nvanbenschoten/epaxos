@@ -7,6 +7,11 @@ SELECT 1
 ----
 1
 
+query T
+SELECT NULL
+----
+NULL
+
 query II colnames
 SELECT 1+1 AS two, 2+2 AS four
 ----
@@ -18,7 +23,7 @@ two four
 statement ok
 CREATE TABLE abc (a INT PRIMARY KEY, b INT, c INT)
 
-query error syntax error at or near \"FROM\"
+query error syntax error at or near "from"
 SELECT FROM abc
 
 query error could not parse 'hello' as type bool
@@ -32,6 +37,13 @@ SELECT * FROM abc
 ----
 a b c
 1 2 3
+
+query TIII colnames
+SELECT NULL, * FROM abc
+----
+NULL a b c
+NULL 1 2 3
+
 
 # synonym for SELECT * FROM abc
 query III
@@ -228,6 +240,16 @@ SELECT * FROM xyzw ORDER BY x LIMIT 1
 
 query IIII
 SELECT * FROM xyzw ORDER BY x LIMIT 1 OFFSET 1
+----
+4 5 6 7
+
+query IIII
+SELECT * FROM xyzw ORDER BY y OFFSET 1
+----
+4 5 6 7
+
+query IIII
+SELECT * FROM xyzw ORDER BY y OFFSET 1 LIMIT 1
 ----
 4 5 6 7
 

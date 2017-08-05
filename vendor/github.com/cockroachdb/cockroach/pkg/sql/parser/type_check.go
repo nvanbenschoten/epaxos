@@ -23,6 +23,7 @@ import (
 
 	"golang.org/x/text/language"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/pkg/errors"
 )
@@ -40,13 +41,22 @@ type SemaContext struct {
 	// names. The path elements must be normalized via Name.Normalize()
 	// already.
 	SearchPath []string
+
+	// privileged, if true, enables "unsafe" builtins, e.g. those
+	// from the crdb_internal namespace. Must be set only for
+	// the root user.
+	// TODO(knz): this attribute can be moved to EvalContext pending #15363.
+	privileged bool
 }
 
 // MakeSemaContext initializes a simple SemaContext suitable
 // for "lightweight" type checking such as the one performed for default
 // expressions.
-func MakeSemaContext() SemaContext {
-	return SemaContext{Placeholders: MakePlaceholderInfo()}
+func MakeSemaContext(privileged bool) SemaContext {
+	return SemaContext{
+		Placeholders: MakePlaceholderInfo(),
+		privileged:   privileged,
+	}
 }
 
 // isUnresolvedPlaceholder provides a nil-safe method to determine whether expr is an
@@ -441,6 +451,13 @@ func (expr *FuncExpr) TypeCheck(ctx *SemaContext, desired Type) (TypedExpr, erro
 			return nil, fmt.Errorf("FILTER specified but %s() is not an aggregate function", expr.Func)
 		}
 
+	}
+
+	// Check that the built-in is allowed for the current user.
+	// TODO(knz): this check can be moved to evaluation time pending #15363.
+	if builtin.privileged && !ctx.privileged {
+		return nil, pgerror.NewErrorf(pgerror.CodeInsufficientPrivilegeError,
+			"insufficient privilege to use %s", expr.Func)
 	}
 
 	for i, subExpr := range typedSubExprs {
@@ -1027,7 +1044,7 @@ func typeCheckSameTypedExprs(
 	}
 
 	// Hold the resolved type expressions of the provided exprs, in order.
-	// TODO(nvanbenschoten) Look into reducing allocations here.
+	// TODO(nvanbenschoten): Look into reducing allocations here.
 	typedExprs := make([]TypedExpr, len(exprs))
 
 	// Split the expressions into three groups of indexed expressions:
@@ -1064,14 +1081,18 @@ func typeCheckSameTypedExprs(
 	// provided to signify the desired shared type, which can be set to the
 	// required shared type using the second parameter.
 	typeCheckSameTypedConsts := func(typ Type, required bool) (Type, error) {
-		setTypeForConsts := func(typ Type) {
+		setTypeForConsts := func(typ Type) (Type, error) {
 			for _, constExpr := range constExprs {
 				typedExpr, err := typeCheckAndRequire(ctx, constExpr.e, typ, "constant")
 				if err != nil {
-					panic(err)
+					// In this case, even though the constExpr has been shown to be
+					// upcastable to typ based on canConstantBecome, it can't actually be
+					// parsed as typ.
+					return nil, err
 				}
 				typedExprs[constExpr.i] = typedExpr
 			}
+			return typ, nil
 		}
 
 		// If typ is not a wildcard, all consts try to become typ.
@@ -1091,16 +1112,14 @@ func typeCheckSameTypedExprs(
 				}
 			}
 			if all {
-				setTypeForConsts(typ)
-				return typ, nil
+				return setTypeForConsts(typ)
 			}
 		}
 
 		// If not all constExprs could become typ but they have a mutual
 		// resolvable type, use this common type.
 		if bestType, ok := commonConstantType(constExprs); ok {
-			setTypeForConsts(bestType)
-			return bestType, nil
+			return setTypeForConsts(bestType)
 		}
 
 		// If not, we want to force an error because the constants cannot all
@@ -1237,7 +1256,7 @@ func typeCheckSameTypedTupleExprs(
 	ctx *SemaContext, desired Type, exprs ...Expr,
 ) ([]TypedExpr, Type, error) {
 	// Hold the resolved type expressions of the provided exprs, in order.
-	// TODO(nvanbenschoten) Look into reducing allocations here.
+	// TODO(nvanbenschoten): Look into reducing allocations here.
 	typedExprs := make([]TypedExpr, len(exprs))
 
 	// All other exprs must be tuples.
@@ -1395,7 +1414,7 @@ func (*placeholderAnnotationVisitor) VisitPost(expr Expr) Expr { return expr }
 //   map, no error will be thrown, and the placeholder will keep it's previously
 //   inferred type.
 //
-// TODO(nvanbenschoten) Can this visitor and map be preallocated (like normalizeVisitor)?
+// TODO(nvanbenschoten): Can this visitor and map be preallocated (like normalizeVisitor)?
 func (p PlaceholderTypes) ProcessPlaceholderAnnotations(stmt Statement) error {
 	v := placeholderAnnotationVisitor{make(map[string]annotationState)}
 

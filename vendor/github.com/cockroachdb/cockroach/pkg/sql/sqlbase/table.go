@@ -45,33 +45,34 @@ func incompatibleExprTypeError(
 		context, expectedType, actualType)
 }
 
-// SanitizeVarFreeExpr verifies a default expression is valid, has the
-// correct type and contains no variable expressions.
+// SanitizeVarFreeExpr verifies that an expression is valid, has the correct
+// type and contains no variable expressions. It returns the type-checked and
+// constant-folded expression.
 func SanitizeVarFreeExpr(
 	expr parser.Expr, expectedType parser.Type, context string, searchPath parser.SearchPath,
-) error {
+) (parser.TypedExpr, error) {
 	if parser.ContainsVars(expr) {
-		return exprContainsVarsError(context, expr)
+		return nil, exprContainsVarsError(context, expr)
 	}
 	ctx := parser.SemaContext{SearchPath: searchPath}
 	typedExpr, err := parser.TypeCheck(expr, &ctx, expectedType)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defaultType := typedExpr.ResolvedType()
 	if !expectedType.Equivalent(defaultType) && typedExpr != parser.DNull {
 		// The DEFAULT expression must match the column type exactly unless it is a
 		// constant NULL value.
-		return incompatibleExprTypeError(context, expectedType, defaultType)
+		return nil, incompatibleExprTypeError(context, expectedType, defaultType)
 	}
-	return nil
+	return typedExpr, nil
 }
 
 // MakeColumnDefDescs creates the column descriptor for a column, as well as the
 // index descriptor if the column is a primary key or unique.
 // The search path is used for name resolution for DEFAULT expressions.
 func MakeColumnDefDescs(
-	d *parser.ColumnTableDef, searchPath parser.SearchPath,
+	d *parser.ColumnTableDef, searchPath parser.SearchPath, evalCtx *parser.EvalContext,
 ) (*ColumnDescriptor, *IndexDescriptor, error) {
 	col := &ColumnDescriptor{
 		Name:     string(d.Name),
@@ -159,7 +160,7 @@ func MakeColumnDefDescs(
 
 	if d.HasDefaultExpr() {
 		// Verify the default expression type is compatible with the column type.
-		if err := SanitizeVarFreeExpr(
+		if _, err := SanitizeVarFreeExpr(
 			d.DefaultExpr.Expr, colDatumType, "DEFAULT", searchPath,
 		); err != nil {
 			return nil, nil, err
@@ -170,6 +171,24 @@ func MakeColumnDefDescs(
 		); err != nil {
 			return nil, nil, err
 		}
+
+		// Type check and simplify: this performs constant folding and reduces the expression.
+		typedExpr, err := parser.TypeCheck(d.DefaultExpr.Expr, nil, col.Type.ToDatumType())
+		if err != nil {
+			return nil, nil, err
+		}
+		if typedExpr, err = p.NormalizeExpr(evalCtx, typedExpr); err != nil {
+			return nil, nil, err
+		}
+		// Try to evaluate once. If it is aimed to succeed during a
+		// backfill, it must succeed here too. This tries to ensure that
+		// we don't end up failing the evaluation during the schema change
+		// proper.
+		if _, err := typedExpr.Eval(evalCtx); err != nil {
+			return nil, nil, err
+		}
+		d.DefaultExpr.Expr = typedExpr
+
 		s := parser.Serialize(d.DefaultExpr.Expr)
 		col.DefaultExpr = &s
 	}
@@ -1539,7 +1558,7 @@ func CheckValueWidth(col ColumnDescriptor, val parser.Datum) error {
 				// data is of variable length up to the maximum length n; longer
 				// strings will be rejected."
 				//
-				// TODO(nvanbenschoten) Because we do not propagate the "varying"
+				// TODO(nvanbenschoten): Because we do not propagate the "varying"
 				// flag on the column type, the best we can do here is conservatively
 				// assume the varying bit type and error only on longer bit strings.
 				mostSignificantBit := int32(0)
@@ -1697,7 +1716,11 @@ func (desc TableDescriptor) collectConstraintInfo(
 			detail := ConstraintDetail{Kind: ConstraintTypeFK}
 			detail.Unvalidated = index.ForeignKey.Validity == ConstraintValidity_Unvalidated
 			if tableLookup != nil {
-				detail.Columns = index.ColumnNames
+				numCols := len(index.ColumnIDs)
+				if index.ForeignKey.SharedPrefixLen > 0 {
+					numCols = int(index.ForeignKey.SharedPrefixLen)
+				}
+				detail.Columns = index.ColumnNames[:numCols]
 				detail.Index = index
 				other, err := tableLookup(index.ForeignKey.Table)
 				if err != nil {

@@ -26,6 +26,17 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 )
 
+// importRequestLimit is the number of Import requests that can run at once.
+// Each downloads a file from cloud storage to a temp file, iterates it, and
+// sends WriteBatch requests to batch insert it. After accounting for write
+// amplification, a single ImportRequest and the resulting WriteBatch
+// requests is enough to keep an SSD busy. Any more and we risk contending
+// RocksDB, which slows down heartbeats, which can cause mass lease
+// transfers.
+const importRequestLimit = 1
+
+var importRequestLimiter = makeConcurrentRequestLimiter(importRequestLimit)
+
 func init() {
 	storage.SetImportCmd(evalImport)
 }
@@ -34,28 +45,31 @@ func init() {
 func evalImport(ctx context.Context, cArgs storage.CommandArgs) (*roachpb.ImportResponse, error) {
 	args := cArgs.Args.(*roachpb.ImportRequest)
 	db := cArgs.EvalCtx.DB()
-	kr := KeyRewriter(args.KeyRewrites)
+	kr, err := MakeKeyRewriter(args.Rekeys)
+	if err != nil {
+		return nil, errors.Wrap(err, "make key rewriter")
+	}
 
 	var importStart, importEnd roachpb.Key
 	{
 		var ok bool
-		importStart, ok = kr.RewriteKey(append([]byte(nil), args.DataSpan.Key...))
+		importStart, ok, _ = kr.RewriteKey(append([]byte(nil), args.DataSpan.Key...))
 		if !ok {
-			return nil, errors.Errorf("could not rewrite key: %s", importStart)
+			return nil, errors.Errorf("could not rewrite span start key: %s", importStart)
 		}
-		importEnd, ok = kr.RewriteKey(append([]byte(nil), args.DataSpan.EndKey...))
+		importEnd, ok, _ = kr.RewriteKey(append([]byte(nil), args.DataSpan.EndKey...))
 		if !ok {
-			return nil, errors.Errorf("could not rewrite key: %s", importEnd)
+			return nil, errors.Errorf("could not rewrite span end key: %s", importEnd)
 		}
 	}
 
 	ctx, span := tracing.ChildSpan(ctx, fmt.Sprintf("Import [%s,%s)", importStart, importEnd))
 	defer tracing.FinishSpan(span)
 
-	if err := beginLimitedRequest(ctx); err != nil {
+	if err := importRequestLimiter.beginLimitedRequest(ctx); err != nil {
 		return nil, err
 	}
-	defer endLimitedRequest()
+	defer importRequestLimiter.endLimitedRequest()
 	log.Infof(ctx, "import [%s,%s)", importStart, importEnd)
 
 	// Arrived at by tuning and watching the effect on BenchmarkRestore.
@@ -180,7 +194,11 @@ func evalImport(ctx context.Context, cArgs storage.CommandArgs) (*roachpb.Import
 		value := roachpb.Value{RawBytes: valueScratch}
 
 		var ok bool
-		key.Key, ok = kr.RewriteKey(key.Key)
+		var err error
+		key.Key, ok, err = kr.RewriteKey(key.Key)
+		if err != nil {
+			return nil, err
+		}
 		if !ok {
 			// If the key rewriter didn't match this key, it's not data for the
 			// table(s) we're interested in.

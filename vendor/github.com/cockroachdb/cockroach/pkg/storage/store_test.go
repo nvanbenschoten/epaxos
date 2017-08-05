@@ -991,8 +991,9 @@ func TestStoreSendBadRange(t *testing.T) {
 }
 
 // splitTestRange splits a range. This does *not* fully emulate a real split
-// and should not be used in new tests. Tests that need splits should live in
-// client_split_test.go and use AdminSplit instead of this function.
+// and should not be used in new tests. Tests that need splits should either live in
+// client_split_test.go and use AdminSplit instead of this function or use the
+// TestServerInterface.
 // See #702
 // TODO(bdarnell): convert tests that use this function to use AdminSplit instead.
 func splitTestRange(store *Store, key, splitKey roachpb.RKey, t *testing.T) *Replica {
@@ -2242,7 +2243,7 @@ func TestStoreRemovePlaceholderOnError(t *testing.T) {
 
 // Test that we remove snapshot placeholders when raft ignores the
 // snapshot. This is testing the removal of placeholder after handleRaftReady
-// processing for an unitialized Replica.
+// processing for an uninitialized Replica.
 func TestStoreRemovePlaceholderOnRaftIgnored(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	tc := testContext{}
@@ -2507,7 +2508,7 @@ func TestSendSnapshotThrottling(t *testing.T) {
 	}
 	newBatch := e.NewBatch
 
-	// Test that a failed Recv() fauses a fail throttle
+	// Test that a failed Recv() causes a fail throttle
 	{
 		sp := &fakeStorePool{}
 		expectedErr := errors.New("")

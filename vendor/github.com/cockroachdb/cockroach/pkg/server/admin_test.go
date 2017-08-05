@@ -321,7 +321,7 @@ func TestAdminAPIDatabaseDoesNotExist(t *testing.T) {
 	defer s.Stopper().Stop(context.TODO())
 
 	const errPattern = "database.+does not exist"
-	if err := getAdminJSONProto(s, "databases/I_DO_NOT_EXIST", nil); !testutils.IsError(err, errPattern) {
+	if err := getAdminJSONProto(s, "databases/i_do_not_exist", nil); !testutils.IsError(err, errPattern) {
 		t.Fatalf("unexpected error: %v\nexpected: %s", err, errPattern)
 	}
 }
@@ -355,7 +355,7 @@ func TestAdminAPITableDoesNotExist(t *testing.T) {
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop(context.TODO())
 
-	const fakename = "I_DO_NOT_EXIST"
+	const fakename = "i_do_not_exist"
 	const badDBPath = "databases/" + fakename + "/tables/foo"
 	const dbErrPattern = `database \\"` + fakename + `\\" does not exist`
 	if err := getAdminJSONProto(s, badDBPath, nil); !testutils.IsError(err, dbErrPattern) {
@@ -431,7 +431,7 @@ func TestAdminAPITableDetails(t *testing.T) {
 						)`, escDBName, escTblName),
 				fmt.Sprintf("GRANT SELECT ON %s.%s TO readonly", escDBName, escTblName),
 				fmt.Sprintf("GRANT SELECT,UPDATE,DELETE ON %s.%s TO app", escDBName, escTblName),
-				fmt.Sprintf("CREATE INDEX descIdx ON %s.%s (default2 DESC)", escDBName, escTblName),
+				fmt.Sprintf("CREATE INDEX descidx ON %s.%s (default2 DESC)", escDBName, escTblName),
 			}
 
 			for _, q := range setupQueries {
@@ -452,9 +452,9 @@ func TestAdminAPITableDetails(t *testing.T) {
 			// Verify columns.
 			expColumns := []serverpb.TableDetailsResponse_Column{
 				{Name: "nulls_allowed", Type: "INT", Nullable: true, DefaultValue: ""},
-				{Name: "nulls_not_allowed", Type: "INT", Nullable: false, DefaultValue: "1000"},
-				{Name: "default2", Type: "INT", Nullable: true, DefaultValue: "2"},
-				{Name: "string_default", Type: "STRING", Nullable: true, DefaultValue: "'default_string'"},
+				{Name: "nulls_not_allowed", Type: "INT", Nullable: false, DefaultValue: "1000:::INT"},
+				{Name: "default2", Type: "INT", Nullable: true, DefaultValue: "2:::INT"},
+				{Name: "string_default", Type: "STRING", Nullable: true, DefaultValue: "'default_string':::STRING"},
 			}
 			testutils.SortStructs(expColumns, "Name")
 			testutils.SortStructs(resp.Columns, "Name")
@@ -493,8 +493,8 @@ func TestAdminAPITableDetails(t *testing.T) {
 			// Verify indexes.
 			expIndexes := []serverpb.TableDetailsResponse_Index{
 				{Name: "primary", Column: "rowid", Direction: "ASC", Unique: true, Seq: 1},
-				{Name: "descIdx", Column: "rowid", Direction: "ASC", Unique: false, Seq: 2, Implicit: true},
-				{Name: "descIdx", Column: "default2", Direction: "DESC", Unique: false, Seq: 1},
+				{Name: "descidx", Column: "rowid", Direction: "ASC", Unique: false, Seq: 2, Implicit: true},
+				{Name: "descidx", Column: "default2", Direction: "DESC", Unique: false, Seq: 1},
 			}
 			testutils.SortStructs(expIndexes, "Name", "Seq")
 			testutils.SortStructs(resp.Indexes, "Name", "Seq")

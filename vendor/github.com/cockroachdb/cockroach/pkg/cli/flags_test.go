@@ -87,7 +87,7 @@ func TestSQLMemoryPoolFlagValue(t *testing.T) {
 	}
 }
 
-func TestRaftTickIntervalFlagValue(t *testing.T) {
+func TestClockOffsetFlagValue(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	f := startCmd.Flags()
@@ -95,16 +95,16 @@ func TestRaftTickIntervalFlagValue(t *testing.T) {
 		args     []string
 		expected time.Duration
 	}{
-		{nil, base.DefaultRaftTickInterval},
-		{[]string{"--raft-tick-interval", "200ms"}, 200 * time.Millisecond},
+		{nil, base.DefaultMaxClockOffset},
+		{[]string{"--max-offset", "200ms"}, 200 * time.Millisecond},
 	}
 
 	for i, td := range testData {
 		if err := f.Parse(td.args); err != nil {
 			t.Fatal(err)
 		}
-		if td.expected != serverCfg.RaftTickInterval {
-			t.Errorf("%d. RaftTickInterval expected %d, but got %d", i, td.expected, serverCfg.RaftTickInterval)
+		if td.expected != serverCfg.MaxOffset {
+			t.Errorf("%d. MaxOffset expected %v, but got %v", i, td.expected, serverCfg.RaftTickInterval)
 		}
 	}
 }

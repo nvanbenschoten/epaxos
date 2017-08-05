@@ -19,42 +19,67 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"time"
+	"hash/fnv"
+	"strconv"
 
 	"golang.org/x/net/context"
 
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
-	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/pkg/errors"
 )
+
+type stmtKey struct {
+	stmt        string
+	failed      bool
+	distSQLUsed bool
+}
 
 // appStats holds per-application statistics.
 type appStats struct {
 	syncutil.Mutex
 
-	stmts map[string]*stmtStats
+	stmts map[stmtKey]*stmtStats
 }
 
 // stmtStats holds per-statement statistics.
 type stmtStats struct {
 	syncutil.Mutex
 
-	data StatementStatistics
+	data roachpb.StatementStatistics
 }
 
 // StmtStatsEnable determines whether to collect per-statement
 // statistics.
-var StmtStatsEnable = envutil.EnvOrDefaultBool(
-	"COCKROACH_SQL_STMT_STATS_ENABLE", true,
+var StmtStatsEnable = settings.RegisterBoolSetting(
+	"sql.metrics.statement_details.enabled", "collect per-statement query statistics ", true,
 )
 
 // SQLStatsCollectionLatencyThreshold specifies the minimum amount of time
 // consumed by a SQL statement before it is collected for statistics reporting.
-var SQLStatsCollectionLatencyThreshold = envutil.EnvOrDefaultFloat(
-	"COCKROACH_SQL_STATS_SVCLAT_THRESHOLD", 0,
+var SQLStatsCollectionLatencyThreshold = settings.RegisterDurationSetting(
+	"sql.metrics.statement_details.threshold",
+	"minmum execution time to cause statics to be collected",
+	0,
 )
+
+func (s stmtKey) String() string {
+	return s.flags() + s.stmt
+}
+
+func (s stmtKey) flags() string {
+	var b bytes.Buffer
+	if s.failed {
+		b.WriteByte('!')
+	}
+	if s.distSQLUsed {
+		b.WriteByte('+')
+	}
+	return b.String()
+}
 
 func (a *appStats) recordStatement(
 	stmt parser.Statement,
@@ -64,11 +89,11 @@ func (a *appStats) recordStatement(
 	err error,
 	parseLat, planLat, runLat, svcLat, ovhLat float64,
 ) {
-	if a == nil || !StmtStatsEnable {
+	if a == nil || !StmtStatsEnable.Get() {
 		return
 	}
 
-	if svcLat < SQLStatsCollectionLatencyThreshold {
+	if t := SQLStatsCollectionLatencyThreshold.Get(); t > 0 && t.Seconds() >= svcLat {
 		return
 	}
 
@@ -82,17 +107,11 @@ func (a *appStats) recordStatement(
 	// there was an error and/or whether the query was distributed, so
 	// that we use separate buckets for the different situations.
 	var buf bytes.Buffer
-	if err != nil {
-		buf.WriteByte('!')
-	}
-	if distSQLUsed {
-		buf.WriteByte('+')
-	}
+
 	parser.FormatNode(&buf, parser.FmtHideConstants, stmt)
-	stmtKey := buf.String()
 
 	// Get the statistics object.
-	s := a.getStatsForStmt(stmtKey)
+	s := a.getStatsForStmt(stmtKey{stmt: buf.String(), failed: err != nil, distSQLUsed: distSQLUsed})
 
 	// Collect the per-statement statistics.
 	s.Lock()
@@ -105,35 +124,24 @@ func (a *appStats) recordStatement(
 	} else if int64(automaticRetryCount) > s.data.MaxRetries {
 		s.data.MaxRetries = int64(automaticRetryCount)
 	}
-	s.data.NumRows.record(s.data.Count, float64(numRows))
-	s.data.ParseLat.record(s.data.Count, parseLat)
-	s.data.PlanLat.record(s.data.Count, planLat)
-	s.data.RunLat.record(s.data.Count, runLat)
-	s.data.ServiceLat.record(s.data.Count, svcLat)
-	s.data.OverheadLat.record(s.data.Count, ovhLat)
+	s.data.NumRows.Record(s.data.Count, float64(numRows))
+	s.data.ParseLat.Record(s.data.Count, parseLat)
+	s.data.PlanLat.Record(s.data.Count, planLat)
+	s.data.RunLat.Record(s.data.Count, runLat)
+	s.data.ServiceLat.Record(s.data.Count, svcLat)
+	s.data.OverheadLat.Record(s.data.Count, ovhLat)
 	s.Unlock()
 }
 
-// Retrieve the variance of the values.
-func (l *NumericStat) getVariance(count int64) float64 {
-	return l.SquaredDiffs / (float64(count) - 1)
-}
-
-func (l *NumericStat) record(count int64, val float64) {
-	delta := val - l.Mean
-	l.Mean += delta / float64(count)
-	l.SquaredDiffs += delta * (val - l.Mean)
-}
-
 // getStatsForStmt retrieves the per-stmt stat object.
-func (a *appStats) getStatsForStmt(stmtKey string) *stmtStats {
+func (a *appStats) getStatsForStmt(key stmtKey) *stmtStats {
 	a.Lock()
 	// Retrieve the per-statement statistic object, and create it if it
 	// doesn't exist yet.
-	s, ok := a.stmts[stmtKey]
+	s, ok := a.stmts[key]
 	if !ok {
 		s = &stmtStats{}
-		a.stmts[stmtKey] = s
+		a.stmts[key] = s
 	}
 	a.Unlock()
 	return s
@@ -165,10 +173,16 @@ func (s *sqlStats) getStatsForApplication(appName string) *appStats {
 	if a, ok := s.apps[appName]; ok {
 		return a
 	}
-	a := &appStats{stmts: make(map[string]*stmtStats)}
+	a := &appStats{stmts: make(map[stmtKey]*stmtStats)}
 	s.apps[appName] = a
 	return a
 }
+
+var dumpStmtStatsToLogBeforeReset = settings.RegisterBoolSetting(
+	"sql.metrics.statement_details.dump_to_logs",
+	"dump collected statement statistics to node logs when periodically cleared",
+	false,
+)
 
 // resetStats clears all the stored per-app and per-statement
 // statistics.
@@ -197,18 +211,20 @@ func (s *sqlStats) resetStats(ctx context.Context) {
 		// TODO(knz/dt): instead of dumping the stats to the log, save
 		// them in a SQL table so they can be inspected by the DBA and/or
 		// the UI.
-		dumpStmtStats(ctx, appName, a.stmts)
+		if dumpStmtStatsToLogBeforeReset.Get() {
+			dumpStmtStats(ctx, appName, a.stmts)
+		}
 
 		// Clear the map, to release the memory; make the new map somewhat
 		// already large for the likely future workload.
-		a.stmts = make(map[string]*stmtStats, len(a.stmts)/2)
+		a.stmts = make(map[stmtKey]*stmtStats, len(a.stmts)/2)
 		a.Unlock()
 	}
 	s.Unlock()
 }
 
 // Save the existing data for an application to the info log.
-func dumpStmtStats(ctx context.Context, appName string, stats map[string]*stmtStats) {
+func dumpStmtStats(ctx context.Context, appName string, stats map[stmtKey]*stmtStats) {
 	if len(stats) == 0 {
 		return
 	}
@@ -219,35 +235,81 @@ func dumpStmtStats(ctx context.Context, appName string, stats map[string]*stmtSt
 		json, err := json.Marshal(s.data)
 		s.Unlock()
 		if err != nil {
-			log.Errorf(ctx, "error while marshaling stats for %q // %q: %v", appName, key, err)
+			log.Errorf(ctx, "error while marshaling stats for %q // %q: %v", appName, key.String(), err)
 			continue
 		}
-		fmt.Fprintf(&buf, "%q: %s\n", key, json)
+		fmt.Fprintf(&buf, "%q: %s\n", key.String(), json)
 	}
 	log.Info(ctx, buf.String())
 }
 
-// StmtStatsResetFrequency is the frequency at which per-app and
-// per-statement statistics are cleared from memory, to avoid
-// unlimited memory growth.
-var StmtStatsResetFrequency = envutil.EnvOrDefaultDuration(
-	"COCKROACH_SQL_STMT_STATS_RESET_INTERVAL", 1*time.Hour,
-)
+func scrubStmtStatKey(vt virtualSchemaHolder, key string) (string, bool) {
+	// Re-parse the statement to obtain its AST.
+	stmt, err := parser.ParseOne(key)
+	if err != nil {
+		return "", false
+	}
 
-// startResetWorker ensures that the data is removed from memory
-// periodically, so as to avoid memory blow-ups.
-func (s *sqlStats) startResetWorker(stopper *stop.Stopper) {
-	ctx := log.WithLogTag(context.Background(), "sql-stats", nil)
-	stopper.RunWorker(ctx, func(ctx context.Context) {
-		ticker := time.NewTicker(StmtStatsResetFrequency)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				s.resetStats(ctx)
-			case <-stopper.ShouldStop():
+	// Re-format to remove most names.
+	formatter := parser.FmtReformatTableNames(parser.FmtAnonymize,
+		func(t *parser.NormalizableTableName, buf *bytes.Buffer, f parser.FmtFlags) {
+			tn, err := t.Normalize()
+			if err != nil {
+				buf.WriteByte('_')
 				return
 			}
+			virtual, err := vt.getVirtualTableEntry(tn)
+			if err != nil || virtual.desc == nil {
+				buf.WriteByte('_')
+				return
+			}
+			// Virtual table: we want to keep the name.
+			tn.Format(buf, parser.FmtParsable)
+		})
+	return parser.AsStringWithFlags(stmt, formatter), true
+}
+
+// AppStatementStatistics is a map: for each app name (as set in sql sessions),
+// it maps statements to their collected statistics.
+type AppStatementStatistics map[string]map[string]roachpb.StatementStatistics
+
+// GetScrubbedStmtStats returns the statement statistics by app, with the
+// queries scrubbed of their identifiers. Any statements which cannot be
+// scrubbed will be omitted from the returned map.
+func (e *Executor) GetScrubbedStmtStats() AppStatementStatistics {
+	ret := make(AppStatementStatistics)
+	vt := e.virtualSchemas
+	e.sqlStats.Lock()
+	for appName, a := range e.sqlStats.apps {
+		hashedApp := HashAppName(appName)
+		a.Lock()
+		m := make(map[string]roachpb.StatementStatistics)
+		for q, stats := range a.stmts {
+			scrubbed, ok := scrubStmtStatKey(vt, q.stmt)
+			if ok {
+				stats.Lock()
+				m[q.flags()+scrubbed] = stats.data
+				stats.Unlock()
+			}
 		}
-	})
+		ret[hashedApp] = m
+		a.Unlock()
+	}
+	e.sqlStats.Unlock()
+	return ret
+}
+
+// HashAppName 1-way hashes an application names for use in stat reporting.
+func HashAppName(appName string) string {
+	hash := fnv.New64a()
+
+	if _, err := hash.Write([]byte(appName)); err != nil {
+		panic(errors.Wrap(err, `"It never returns an error." -- https://golang.org/pkg/hash`))
+	}
+	return strconv.Itoa(int(hash.Sum64()))
+}
+
+// ResetStatementStats resets the executor's collected statement statistics.
+func (e *Executor) ResetStatementStats(ctx context.Context) {
+	e.sqlStats.resetStats(ctx)
 }

@@ -63,9 +63,8 @@ import (
 
 const (
 	// rangeIDAllocCount is the number of Range IDs to allocate per allocation.
-	rangeIDAllocCount               = 10
-	defaultHeartbeatIntervalTicks   = 5
-	defaultRaftElectionTimeoutTicks = 15
+	rangeIDAllocCount             = 10
+	defaultHeartbeatIntervalTicks = 5
 	// ttlStoreGossip is time-to-live for store-related info.
 	ttlStoreGossip = 2 * time.Minute
 
@@ -108,12 +107,19 @@ const (
 	// additional work to a store that is either not keeping up or is undergoing
 	// recovery because it is on a recently restarted node.
 	prohibitRebalancesBehindThreshold = 1000
+
+	// IntersectingSnapshotMsg is part of the error message returned from
+	// canApplySnapshotLocked and is exposed here so testing can rely on it.
+	IntersectingSnapshotMsg = "snapshot intersects existing range"
 )
 
 var changeTypeInternalToRaft = map[roachpb.ReplicaChangeType]raftpb.ConfChangeType{
 	roachpb.ADD_REPLICA:    raftpb.ConfChangeAddNode,
 	roachpb.REMOVE_REPLICA: raftpb.ConfChangeRemoveNode,
 }
+
+var defaultRaftElectionTimeoutTicks = envutil.EnvOrDefaultInt(
+	"COCKROACH_RAFT_ELECTION_TIMEOUT_TICKS", 15)
 
 var storeSchedulerConcurrency = envutil.EnvOrDefaultInt(
 	"COCKROACH_SCHEDULER_CONCURRENCY", 8*runtime.NumCPU())
@@ -825,7 +831,7 @@ func (sc *StoreConfig) Valid() bool {
 
 // SetDefaults initializes unset fields in StoreConfig to values
 // suitable for use on a local network.
-// TODO(tschottdorf) see if this ought to be configurable via flags.
+// TODO(tschottdorf): see if this ought to be configurable via flags.
 func (sc *StoreConfig) SetDefaults() {
 	if (sc.RangeRetryOptions == retry.Options{}) {
 		sc.RangeRetryOptions = base.DefaultRetryOptions()
@@ -878,7 +884,7 @@ func (sc *StoreConfig) LeaseExpiration() int64 {
 
 // NewStore returns a new instance of a store.
 func NewStore(cfg StoreConfig, eng engine.Engine, nodeDesc *roachpb.NodeDescriptor) *Store {
-	// TODO(tschottdorf) find better place to set these defaults.
+	// TODO(tschottdorf): find better place to set these defaults.
 	cfg.SetDefaults()
 
 	if !cfg.Valid() {
@@ -886,7 +892,7 @@ func NewStore(cfg StoreConfig, eng engine.Engine, nodeDesc *roachpb.NodeDescript
 	}
 	s := &Store{
 		cfg:      cfg,
-		db:       cfg.DB, // TODO(tschottdorf) remove redundancy.
+		db:       cfg.DB, // TODO(tschottdorf): remove redundancy.
 		engine:   eng,
 		nodeDesc: nodeDesc,
 		metrics:  newStoreMetrics(cfg.HistogramWindowInterval),
@@ -987,14 +993,14 @@ func (s *Store) SetDraining(drain bool) {
 
 	var wg sync.WaitGroup
 
-	ctx := context.TODO()
+	ctx := log.WithLogTag(context.Background(), "drain", nil)
 	// Limit the number of concurrent lease transfers.
 	sem := make(chan struct{}, 100)
 	sysCfg, sysCfgSet := s.cfg.Gossip.GetSystemConfig()
 	newStoreReplicaVisitor(s).Visit(func(r *Replica) bool {
 		wg.Add(1)
 		if err := s.stopper.RunLimitedAsyncTask(
-			ctx, sem, true /* wait */, func(ctx context.Context) {
+			r.AnnotateCtx(ctx), sem, true /* wait */, func(ctx context.Context) {
 				defer wg.Done()
 				var drainingLease *roachpb.Lease
 				for {
@@ -1821,16 +1827,16 @@ func splitPostApply(
 	rightRng.mu.Lock()
 	// Copy the minLeaseProposedTS from the LHS.
 	rightRng.mu.minLeaseProposedTS = r.mu.minLeaseProposedTS
-	rightLease := rightRng.mu.state.Lease
-	rightReplicaID := rightRng.mu.replicaID
+	rightLease := *rightRng.mu.state.Lease
 	rightRng.mu.Unlock()
 	r.mu.Unlock()
 	log.Event(ctx, "copied timestamp cache")
 
 	// Invoke the leasePostApply method to ensure we properly initialize
 	// the replica according to whether it holds the lease. This enables
-	// the PushTxnQueue. Note that we pass in an empty lease for prevLease.
-	rightRng.leasePostApply(ctx, rightLease, rightReplicaID, &roachpb.Lease{})
+	// the PushTxnQueue. Note that we pass in an right lease for prevLease so
+	// that we don't unnecessarily update the timestamp cache.
+	rightRng.leasePostApply(ctx, rightLease)
 
 	// Add the RHS replica to the store. This step atomically updates
 	// the EndKey of the LHS replica and also adds the RHS replica
@@ -2023,7 +2029,7 @@ func (s *Store) addReplicaInternalLocked(repl *Replica) error {
 		return errors.Errorf("attempted to add uninitialized range %s", repl)
 	}
 
-	// TODO(spencer); will need to determine which range is
+	// TODO(spencer): will need to determine which range is
 	// newer, and keep that one.
 	if err := s.addReplicaToRangeMapLocked(repl); err != nil {
 		return err
@@ -2562,7 +2568,8 @@ func (s *Store) Send(
 				// only), return an txn retry error after the first failure
 				// to guarantee a retry.
 				if ba.Txn != nil {
-					return nil, roachpb.NewErrorWithTxn(roachpb.NewTransactionRetryError(), ba.Txn)
+					err := roachpb.NewTransactionRetryError(roachpb.RETRY_REASON_UNKNOWN)
+					return nil, roachpb.NewErrorWithTxn(err, ba.Txn)
 				}
 				return nil, pErr
 			}
@@ -3171,11 +3178,11 @@ type SnapshotStorePool interface {
 }
 
 var rebalanceSnapshotRate = settings.RegisterByteSizeSetting(
-	"kv.snapshot.rebalance.rate",
+	"kv.snapshot_rebalance.max_rate",
 	"the rate limit (bytes/sec) to use for rebalance snapshots",
 	envutil.EnvOrDefaultBytes("COCKROACH_PREEMPTIVE_SNAPSHOT_RATE", 2<<20))
 var recoverySnapshotRate = settings.RegisterByteSizeSetting(
-	"kv.snapshot.recovery.rate",
+	"kv.snapshot_recovery.max_rate",
 	"the rate limit (bytes/sec) to use for recovery snapshots",
 	envutil.EnvOrDefaultBytes("COCKROACH_RAFT_SNAPSHOT_RATE", 8<<20))
 
@@ -3201,47 +3208,46 @@ func sendSnapshot(
 	sent func(),
 ) error {
 	start := timeutil.Now()
-	storeID := header.RaftMessageRequest.ToReplica.StoreID
+	to := header.RaftMessageRequest.ToReplica
 	if err := stream.Send(&SnapshotRequest{Header: &header}); err != nil {
 		return err
 	}
 	// Wait until we get a response from the server.
 	resp, err := stream.Recv()
 	if err != nil {
-		storePool.throttle(throttleFailed, storeID)
+		storePool.throttle(throttleFailed, to.StoreID)
 		return err
 	}
 	switch resp.Status {
 	case SnapshotResponse_DECLINED:
 		if header.CanDecline {
-			storePool.throttle(throttleDeclined, storeID)
+			storePool.throttle(throttleDeclined, to.StoreID)
 			declinedMsg := "reservation rejected"
 			if len(resp.Message) > 0 {
 				declinedMsg = resp.Message
 			}
-			return errors.Errorf("r%d: remote declined snapshot: %s",
-				header.State.Desc.RangeID, declinedMsg)
+			return errors.Errorf("%s: remote declined snapshot: %s", to, declinedMsg)
 		}
-		storePool.throttle(throttleFailed, storeID)
-		return errors.Errorf("r%d: programming error: remote declined required snapshot: %s",
-			header.State.Desc.RangeID, resp.Message)
+		storePool.throttle(throttleFailed, to.StoreID)
+		return errors.Errorf("%s: programming error: remote declined required snapshot: %s",
+			to, resp.Message)
 	case SnapshotResponse_ERROR:
-		storePool.throttle(throttleFailed, storeID)
-		return errors.Errorf("r%d: remote couldn't accept snapshot with error: %s",
-			header.State.Desc.RangeID, resp.Message)
+		storePool.throttle(throttleFailed, to.StoreID)
+		return errors.Errorf("%s: remote couldn't accept snapshot with error: %s",
+			to, resp.Message)
 	case SnapshotResponse_ACCEPTED:
 	// This is the response we're expecting. Continue with snapshot sending.
 	default:
-		storePool.throttle(throttleFailed, storeID)
-		return errors.Errorf("r%d: server sent an invalid status during negotiation: %s",
-			header.State.Desc.RangeID, resp.Status)
+		storePool.throttle(throttleFailed, to.StoreID)
+		return errors.Errorf("%s: server sent an invalid status during negotiation: %s",
+			to, resp.Status)
 	}
 
 	// The size of batches to send. This is the granularity of rate limiting.
 	const batchSize = 256 << 10 // 256 KB
 	targetRate, err := snapshotRateLimit(header.Priority)
 	if err != nil {
-		return errors.Wrapf(err, "r%d", header.State.Desc.RangeID)
+		return errors.Wrapf(err, "%s", to)
 	}
 
 	// Convert the bytes/sec rate limit to batches/sec.
@@ -3333,30 +3339,28 @@ func sendSnapshot(
 	if err := stream.Send(req); err != nil {
 		return err
 	}
-	log.Infof(ctx, "streamed snapshot: kv pairs: %d, log entries: %d, rate-limit: %s/sec, %0.0fms",
-		n, len(logEntries), humanizeutil.IBytes(int64(targetRate)),
+	log.Infof(ctx, "streamed snapshot to %s: kv pairs: %d, log entries: %d, rate-limit: %s/sec, %0.0fms",
+		to, n, len(logEntries), humanizeutil.IBytes(int64(targetRate)),
 		timeutil.Since(start).Seconds()*1000)
 
 	resp, err = stream.Recv()
 	if err != nil {
-		return errors.Wrapf(err, "r%d: remote failed to apply snapshot", rangeID)
+		return errors.Wrapf(err, "%s: remote failed to apply snapshot", to)
 	}
 	// NB: wait for EOF which ensures that all processing on the server side has
 	// completed (such as defers that might be run after the previous message was
 	// received).
 	if unexpectedResp, err := stream.Recv(); err != io.EOF {
-		return errors.Errorf("r%d: expected EOF, got resp=%v err=%v",
-			rangeID, unexpectedResp, err)
+		return errors.Errorf("%s: expected EOF, got resp=%v err=%v", to, unexpectedResp, err)
 	}
 	switch resp.Status {
 	case SnapshotResponse_ERROR:
-		return errors.Errorf("r%d: remote failed to apply snapshot for reason %s",
-			rangeID, resp.Message)
+		return errors.Errorf("%s: remote failed to apply snapshot for reason %s", to, resp.Message)
 	case SnapshotResponse_APPLIED:
 		return nil
 	default:
-		return errors.Errorf("r%d: server sent an invalid status during finalization: %s",
-			rangeID, resp.Status)
+		return errors.Errorf("%s: server sent an invalid status during finalization: %s",
+			to, resp.Status)
 	}
 }
 
@@ -3758,7 +3762,7 @@ func (s *Store) canApplySnapshotLocked(
 		// When such a conflict exists, it will be resolved by one range
 		// either being split or garbage collected.
 		exReplica, err := s.getReplicaLocked(exRange.Desc().RangeID)
-		msg := "snapshot intersects existing range"
+		msg := IntersectingSnapshotMsg
 		if err != nil {
 			log.Warning(ctx, errors.Wrapf(
 				err, "unable to look up overlapping replica on %s", exReplica))

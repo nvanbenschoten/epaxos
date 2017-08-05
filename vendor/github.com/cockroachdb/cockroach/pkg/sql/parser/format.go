@@ -26,10 +26,9 @@ type fmtFlags struct {
 	ShowTableAliases bool
 	symbolicVars     bool
 	hideConstants    bool
-	// tableNameNormalizer will be called on all NormalizableTableNames if it is
-	// non-nil. Its results will be used if they are non-nil, or ignored if they
-	// are nil.
-	tableNameNormalizer func(*NormalizableTableName) *TableName
+	// tableNameFormatter will be called on all NormalizableTableNames if it is
+	// non-nil.
+	tableNameFormatter func(*NormalizableTableName, *bytes.Buffer, FmtFlags)
 	// indexedVarFormat is an optional interceptor for
 	// IndexedVarContainer.IndexedVarFormat calls; it can be used to
 	// customize the formatting of IndexedVars.
@@ -37,12 +36,16 @@ type fmtFlags struct {
 	// starDatumFormat is an optional interceptor for StarDatum.Format calls,
 	// can be used to customize the formatting of StarDatums.
 	starDatumFormat func(buf *bytes.Buffer, f FmtFlags)
+	// If true, non-function names are replaced by underscores.
+	anonymize bool
 	// If true, strings will be rendered without wrapping quotes if possible.
 	bareStrings bool
 	// If true, datums and placeholders will have type annotations (like
 	// :::interval) as necessary to disambiguate between possible type
 	// resolutions.
 	disambiguateDatumTypes bool
+	// If false, passwords are replaced by *****.
+	showPasswords bool
 }
 
 // FmtFlags enables conditional formatting in the pretty-printer.
@@ -51,6 +54,10 @@ type FmtFlags *fmtFlags
 // FmtSimple instructs the pretty-printer to produce
 // a straightforward representation.
 var FmtSimple FmtFlags = &fmtFlags{}
+
+// FmtSimpleWithPasswords instructs the pretty-printer to produce a
+// straightforward representation that does not suppress passwords.
+var FmtSimpleWithPasswords FmtFlags = &fmtFlags{showPasswords: true}
 
 // FmtShowTypes instructs the pretty-printer to
 // annotate expressions with their resolved types.
@@ -74,12 +81,27 @@ var FmtParsable FmtFlags = &fmtFlags{disambiguateDatumTypes: true}
 // representation that does not disclose query-specific data.
 var FmtHideConstants FmtFlags = &fmtFlags{hideConstants: true}
 
-// FmtNormalizeTableNames returns FmtFlags that instructs the pretty-printer
-// to normalize all table names using the provided function.
-func FmtNormalizeTableNames(base FmtFlags, fn func(*NormalizableTableName) *TableName) FmtFlags {
+// FmtAnonymize instructs the pretty-printer to remove
+// any name but function names.
+// TODO(knz): temporary until a better solution is found for #13968
+var FmtAnonymize FmtFlags = &fmtFlags{anonymize: true}
+
+// FmtReformatTableNames returns FmtFlags that instructs the pretty-printer
+// to substitute the printing of table names using the provided function.
+func FmtReformatTableNames(
+	base FmtFlags, fn func(*NormalizableTableName, *bytes.Buffer, FmtFlags),
+) FmtFlags {
 	f := *base
-	f.tableNameNormalizer = fn
+	f.tableNameFormatter = fn
 	return &f
+}
+
+// StripTypeFormatting removes the flag that extracts types from the format flags,
+// so as to enable rendering expressions for which types have not been computed yet.
+func StripTypeFormatting(f FmtFlags) FmtFlags {
+	nf := *f
+	nf.showTypes = false
+	return &nf
 }
 
 // FmtExpr returns FmtFlags that indicate how the pretty-printer

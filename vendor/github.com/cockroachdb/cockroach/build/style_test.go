@@ -184,6 +184,30 @@ func TestStyle(t *testing.T) {
 		}
 	})
 
+	t.Run("TestTodoStyle", func(t *testing.T) {
+		t.Parallel()
+		cmd, stderr, filter, err := dirCmd(pkg.Dir, "git", "grep", "-nE", `\sTODO\([^)]*\)[^:]`, "--", "*.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := stream.ForEach(filter, func(s string) {
+			t.Errorf(`%s <- use 'TODO(...): ' instead`, s)
+		}); err != nil {
+			t.Error(err)
+		}
+
+		if err := cmd.Wait(); err != nil {
+			if out := stderr.String(); len(out) > 0 {
+				t.Fatalf("err=%s, stderr=%s", err, out)
+			}
+		}
+	})
+
 	t.Run("TestTimeutil", func(t *testing.T) {
 		t.Parallel()
 		cmd, stderr, filter, err := dirCmd(pkg.Dir, "git", "grep", "-nE", `time\.(Now|Since)`, "--", "*.go")
@@ -434,6 +458,8 @@ func TestStyle(t *testing.T) {
 				"Eventf:1",
 				"ErrEvent:1",
 				"ErrEventf:1",
+				"NewError:1",
+				"NewErrorf:1",
 				"VEvent:2",
 				"VEventf:2",
 				"UnimplementedWithIssueErrorf:1",
@@ -502,13 +528,13 @@ func TestStyle(t *testing.T) {
 			}
 			return nil
 		})
-		settingsPkgPrefix := `github.com/cockroachdb/cockroach/pkg/settings: `
+		settingsPkgPrefix := `github.com/cockroachdb/cockroach/pkg/settings`
 		if err := stream.ForEach(stream.Sequence(
 			filter,
 			stream.Sort(),
 			stream.Uniq(),
 			stream.GrepNot(`cockroach/pkg/cmd/`),
-			stream.Grep(`^`+settingsPkgPrefix+`| (github\.com/golang/protobuf/proto|github\.com/satori/go\.uuid|log|path|context|syscall)$`),
+			stream.Grep(`^`+settingsPkgPrefix+`: | (github\.com/golang/protobuf/proto|github\.com/satori/go\.uuid|log|path|context|syscall)$`),
 			stream.GrepNot(`cockroach/pkg/(cli|security): syscall$`),
 			stream.GrepNot(`cockroach/pkg/(base|security|util/(log|randutil|stop)): log$`),
 			stream.GrepNot(`cockroach/pkg/(server/serverpb|ts/tspb): github\.com/golang/protobuf/proto$`),
@@ -528,8 +554,9 @@ func TestStyle(t *testing.T) {
 				t.Errorf(`%s <- please use "golang.org/x/net/context" instead of "context"`, s)
 			case strings.HasSuffix(s, " syscall"):
 				t.Errorf(`%s <- please use "golang.org/x/sys" instead of "syscall"`, s)
-			case strings.HasPrefix(s, settingsPkgPrefix+"github.com/cockroachdb/cockroach"):
-				if !strings.HasSuffix(s, "testutils") && !strings.HasSuffix(s, "humanizeutil") {
+			case strings.HasPrefix(s, settingsPkgPrefix+": github.com/cockroachdb/cockroach"):
+				if !strings.HasSuffix(s, "testutils") && !strings.HasSuffix(s, "humanizeutil") &&
+					!strings.HasSuffix(s, settingsPkgPrefix) {
 					t.Errorf("%s <- please don't add CRDB dependencies to settings pkg", s)
 				}
 			}

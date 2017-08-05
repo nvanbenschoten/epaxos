@@ -70,24 +70,40 @@ type Datum interface {
 	// equal to other and +1 if receiver is greater than other.
 	Compare(ctx *EvalContext, other Datum) int
 
-	// Prev returns the previous datum and true, if one exists, or nil
-	// and false.  The previous datum satisfied the following
-	// definition: if the receiver is "b" and the returned datum is "a",
-	// then "a < b" and no other datum will compare such that "a < c <
-	// b".
-	// The return value is undefined if `IsMin()` returns true.
+	// Prev returns the previous datum and true, if one exists, or nil and false.
+	// The previous datum satisfies the following definition: if the receiver is
+	// "b" and the returned datum is "a", then for every compatible datum "x", it
+	// holds that "x < b" is true if and only if "x <= a" is true.
+	//
+	// The return value is undefined if IsMin() returns true.
+	//
+	// TODO(#12022): for DTuple, the contract is actually that "x < b" (SQL order,
+	// where NULL < x is unknown for all x) is true only if "x <= a"
+	// (.Compare/encoding order, where NULL <= x is true for all x) is true. This
+	// is okay for now: the returned datum is used only to construct a span, which
+	// uses .Compare/encoding order and is guaranteed to be large enough by this
+	// weaker contract. The original filter expression is left in place to catch
+	// false positives.
 	Prev() (Datum, bool)
 
 	// IsMin returns true if the datum is equal to the minimum value the datum
 	// type can hold.
 	IsMin() bool
 
-	// Next returns the next datum and true, if one exists, or nil
-	// and false otherwise. The next datum satisfied the following
-	// definition: if the receiver is "a" and the returned datum is "b",
-	// then "a < b" and no other datum will compare such that "a < c <
-	// b".
-	// The return value is undefined if `IsMax()` returns true.
+	// Next returns the next datum and true, if one exists, or nil and false
+	// otherwise. The next datum satisfies the following definition: if the
+	// receiver is "a" and the returned datum is "b", then for every compatible
+	// datum "x", it holds that "x > a" is true if and only if "x >= b" is true.
+	//
+	// The return value is undefined if IsMax() returns true.
+	//
+	// TODO(#12022): for DTuple, the contract is actually that "x > a" (SQL order,
+	// where x > NULL is unknown for all x) is true only if "x >= b"
+	// (.Compare/encoding order, where x >= NULL is true for all x) is true. This
+	// is okay for now: the returned datum is used only to construct a span, which
+	// uses .Compare/encoding order and is guaranteed to be large enough by this
+	// weaker contract. The original filter expression is left in place to catch
+	// false positives.
 	Next() (Datum, bool)
 
 	// IsMax returns true if the datum is equal to the maximum value the datum
@@ -114,19 +130,19 @@ type Datum interface {
 type Datums []Datum
 
 // Len returns the number of Datum values.
-func (d *Datums) Len() int { return len(*d) }
+func (d Datums) Len() int { return len(d) }
 
 // Reverse reverses the order of the Datum values.
-func (d *Datums) Reverse() {
+func (d Datums) Reverse() {
 	for i, j := 0, d.Len()-1; i < j; i, j = i+1, j-1 {
-		(*d)[i], (*d)[j] = (*d)[j], (*d)[i]
+		d[i], d[j] = d[j], d[i]
 	}
 }
 
 // Format implements the NodeFormatter interface.
-func (d *Datums) Format(buf *bytes.Buffer, f FmtFlags) {
+func (d Datums) Format(buf *bytes.Buffer, f FmtFlags) {
 	buf.WriteByte('(')
-	for i, v := range *d {
+	for i, v := range d {
 		if i > 0 {
 			buf.WriteString(", ")
 		}
@@ -948,61 +964,16 @@ func NewDDateFromTime(t time.Time, loc *time.Location) *DDate {
 	return NewDDate(DDate(secs / secondsInDay))
 }
 
-// time.Time formats.
-const (
-	dateFormat                = "2006-01-02"
-	dateFormatWithOffset      = dateFormat + " -070000"
-	dateFormatNoPad           = "2006-1-2"
-	dateFormatNoPadWithOffset = dateFormatNoPad + " -070000"
-)
-
-var dateFormats = []string{
-	dateFormat,
-	dateFormatWithOffset,
-	dateFormatNoPad,
-	dateFormatNoPadWithOffset,
-	time.RFC3339Nano,
-}
-
-var tzMatch = regexp.MustCompile(` [+-]`)
-
 // ParseDDate parses and returns the *DDate Datum value represented by the provided
 // string in the provided location, or an error if parsing is unsuccessful.
 func ParseDDate(s string, loc *time.Location) (*DDate, error) {
 	// No need to ParseInLocation here because we're only parsing dates.
-
-	l := len(s)
-	// HACK: go doesn't handle offsets that are not zero-padded from psql/jdbc.
-	// Thus, if we see `2015-10-05 +0:0:0` we need to change it to `+000000`.
-	if l > 6 && s[l-2] == ':' && s[l-4] == ':' && (s[l-6] == '+' || s[l-6] == '-') {
-		s = fmt.Sprintf("%s %c0%c0%c0%c", s[:l-6], s[l-6], s[l-5], s[l-3], s[l-1])
+	t, err := parseTimestampInLocation(s, time.UTC, TypeDate)
+	if err != nil {
+		return nil, err
 	}
 
-	if loc := tzMatch.FindStringIndex(s); loc != nil && l > loc[1] {
-		// Remove `:` characters from timezone specifier and pad to 6 digits. A
-		// leading 0 will be added if there are an odd number of digits in the
-		// specifier, since this is short-hand for an offset with number of hours
-		// equal to the leading digit.
-		// This converts all timezone specifiers to the stdNumSecondsTz format in
-		// time/format.go: `-070000`.
-		tzPos := loc[1]
-		tzSpec := strings.Replace(s[tzPos:], ":", "", -1)
-		if len(tzSpec)%2 == 1 {
-			tzSpec = "0" + tzSpec
-		}
-		if len(tzSpec) < 6 {
-			tzSpec += strings.Repeat("0", 6-len(tzSpec))
-		}
-		s = s[:tzPos] + tzSpec
-	}
-
-	for _, format := range dateFormats {
-		if t, err := time.Parse(format, s); err == nil {
-			return NewDDateFromTime(t, loc), nil
-		}
-	}
-
-	return nil, makeParseError(s, TypeDate, nil)
+	return NewDDateFromTime(t, loc), nil
 }
 
 // ResolvedType implements the TypedExpr interface.
@@ -1056,13 +1027,13 @@ func (d *DDate) IsMin() bool {
 
 // max implements the Datum interface.
 func (d *DDate) max() (Datum, bool) {
-	// TODO(knz) figure a good way to find a maximum.
+	// TODO(knz): figure a good way to find a maximum.
 	return nil, false
 }
 
 // min implements the Datum interface.
 func (d *DDate) min() (Datum, bool) {
-	// TODO(knz) figure a good way to find a minimum.
+	// TODO(knz): figure a good way to find a minimum.
 	return nil, false
 }
 
@@ -1097,40 +1068,90 @@ func MakeDTimestamp(t time.Time, precision time.Duration) *DTimestamp {
 
 // time.Time formats.
 const (
-	timestampFormat                       = "2006-01-02 15:04:05"
-	timestampWithOffsetZoneFormat         = timestampFormat + "-07"
-	timestampWithOffsetSecondsZoneFormat  = timestampWithOffsetZoneFormat + ":00"
-	timestampWithNamedZoneFormat          = timestampFormat + " MST"
-	timestampRFC3339NanoWithoutZoneFormat = "2006-01-02T15:04:05"
-	timestampSequelizeFormat              = timestampFormat + ".000 -07:00"
+	dateFormat                = "2006-01-02"
+	dateFormatWithOffset      = dateFormat + " -070000"
+	dateFormatNoPad           = "2006-1-2"
+	dateFormatNoPadWithOffset = dateFormatNoPad + " -070000"
 
-	TimestampJdbcFormat = timestampFormat + ".999999 -07:00:00"
-	TimestampNodeFormat = timestampFormat + ".999999-07:00"
+	timestampFormat                      = dateFormatNoPad + " 15:04:05"
+	timestampWithOffsetZoneFormat        = timestampFormat + "-07"
+	timestampWithOffsetMinutesZoneFormat = timestampWithOffsetZoneFormat + ":00"
+	timestampWithOffsetSecondsZoneFormat = timestampWithOffsetMinutesZoneFormat + ":00"
+	timestampWithNamedZoneFormat         = timestampFormat + " MST"
+	timestampRFC3339WithoutZoneFormat    = dateFormat + "T15:04:05"
+	timestampSequelizeFormat             = timestampFormat + ".000 -07:00"
+
+	timestampJdbcFormat = timestampFormat + ".999999 -070000"
+	timestampNodeFormat = timestampFormat + ".999999-07:00"
+
+	// See https://github.com/lib/pq/blob/8df6253/encode.go#L480.
+	timestampPgwireFormat = "2006-01-02 15:04:05.999999999Z07:00"
+
+	// TimestampOutputFormat is used to output all timestamps.
+	TimestampOutputFormat = "2006-01-02 15:04:05.999999-07:00"
 )
 
 var timeFormats = []string{
 	dateFormat,
+	dateFormatWithOffset,
+	dateFormatNoPad,
+	dateFormatNoPadWithOffset,
 	time.RFC3339Nano,
+	timestampPgwireFormat,
 	timestampWithOffsetZoneFormat,
+	timestampWithOffsetMinutesZoneFormat,
 	timestampWithOffsetSecondsZoneFormat,
 	timestampFormat,
 	timestampWithNamedZoneFormat,
-	timestampRFC3339NanoWithoutZoneFormat,
+	timestampRFC3339WithoutZoneFormat,
 	timestampSequelizeFormat,
-	TimestampNodeFormat,
-	TimestampJdbcFormat,
+	timestampNodeFormat,
+	timestampJdbcFormat,
 }
 
-func parseTimestampInLocation(s string, loc *time.Location) (time.Time, error) {
+var (
+	tzMatch        = regexp.MustCompile(` [+-]`)
+	loneZeroRMatch = regexp.MustCompile(`:(\d(?:[^\d]|$))`)
+)
+
+func parseTimestampInLocation(s string, loc *time.Location, typ Type) (time.Time, error) {
+	origS := s
+	l := len(s)
+	// HACK: go doesn't handle offsets that are not zero-padded from psql/jdbc.
+	// Thus, if we see `2015-10-05 3:0:5 +0:0:0` we need to change it to
+	// `... 3:00:50 +00:00:00`.
+	s = loneZeroRMatch.ReplaceAllString(s, ":0${1}")
+	// This must be run twice, since ReplaceAllString doesn't touch overlapping
+	// matches and thus wouldn't fix a string of the form 3:3:3.
+	s = loneZeroRMatch.ReplaceAllString(s, ":0${1}")
+
+	if loc := tzMatch.FindStringIndex(s); loc != nil && l > loc[1] {
+		// Remove `:` characters from timezone specifier and pad to 6 digits. A
+		// leading 0 will be added if there are an odd number of digits in the
+		// specifier, since this is short-hand for an offset with number of hours
+		// equal to the leading digit.
+		// This converts all timezone specifiers to the stdNumSecondsTz format in
+		// time/format.go: `-070000`.
+		tzPos := loc[1]
+		tzSpec := strings.Replace(s[tzPos:], ":", "", -1)
+		if len(tzSpec)%2 == 1 {
+			tzSpec = "0" + tzSpec
+		}
+		if len(tzSpec) < 6 {
+			tzSpec += strings.Repeat("0", 6-len(tzSpec))
+		}
+		s = s[:tzPos] + tzSpec
+	}
+
 	for _, format := range timeFormats {
 		if t, err := time.ParseInLocation(format, s, loc); err == nil {
 			if err := checkForMissingZone(t, loc); err != nil {
-				return time.Time{}, makeParseError(s, TypeTimestamp, err)
+				return time.Time{}, makeParseError(origS, typ, err)
 			}
 			return t, nil
 		}
 	}
-	return time.Time{}, makeParseError(s, TypeTimestamp, nil)
+	return time.Time{}, makeParseError(origS, typ, nil)
 }
 
 // Unfortunately Go is very strict when parsing abbreviated zone names -- with
@@ -1161,7 +1182,7 @@ func ParseDTimestamp(s string, precision time.Duration) (*DTimestamp, error) {
 	// we do not want to add a non-UTC zone if one is not explicitly stated, so we
 	// use time.UTC rather than the session location. Unfortunately this also means
 	// we do not use the session zone for resolving abbreviations.
-	t, err := parseTimestampInLocation(s, time.UTC)
+	t, err := parseTimestampInLocation(s, time.UTC, TypeTimestamp)
 	if err != nil {
 		return nil, err
 	}
@@ -1236,13 +1257,13 @@ func (d *DTimestamp) IsMin() bool {
 
 // min implements the Datum interface.
 func (d *DTimestamp) min() (Datum, bool) {
-	// TODO(knz) figure a good way to find a minimum.
+	// TODO(knz): figure a good way to find a minimum.
 	return nil, false
 }
 
 // max implements the Datum interface.
 func (d *DTimestamp) max() (Datum, bool) {
-	// TODO(knz) figure a good way to find a minimum.
+	// TODO(knz): figure a good way to find a minimum.
 	return nil, false
 }
 
@@ -1254,7 +1275,7 @@ func (d *DTimestamp) Format(buf *bytes.Buffer, f FmtFlags) {
 	if !f.bareStrings {
 		buf.WriteByte('\'')
 	}
-	buf.WriteString(d.UTC().Format(TimestampNodeFormat))
+	buf.WriteString(d.UTC().Format(TimestampOutputFormat))
 	if !f.bareStrings {
 		buf.WriteByte('\'')
 	}
@@ -1286,7 +1307,7 @@ func MakeDTimestampTZFromDate(loc *time.Location, d *DDate) *DTimestampTZ {
 func ParseDTimestampTZ(
 	s string, loc *time.Location, precision time.Duration,
 ) (*DTimestampTZ, error) {
-	t, err := parseTimestampInLocation(s, loc)
+	t, err := parseTimestampInLocation(s, loc, TypeTimestampTZ)
 	if err != nil {
 		return nil, err
 	}
@@ -1333,13 +1354,13 @@ func (d *DTimestampTZ) IsMin() bool {
 
 // min implements the Datum interface.
 func (d *DTimestampTZ) min() (Datum, bool) {
-	// TODO(knz) figure a good way to find a minimum.
+	// TODO(knz): figure a good way to find a minimum.
 	return nil, false
 }
 
 // max implements the Datum interface.
 func (d *DTimestampTZ) max() (Datum, bool) {
-	// TODO(knz) figure a good way to find a minimum.
+	// TODO(knz): figure a good way to find a minimum.
 	return nil, false
 }
 
@@ -1351,7 +1372,7 @@ func (d *DTimestampTZ) Format(buf *bytes.Buffer, f FmtFlags) {
 	if !f.bareStrings {
 		buf.WriteByte('\'')
 	}
-	buf.WriteString(d.UTC().Format(TimestampNodeFormat))
+	buf.WriteString(d.UTC().Format(TimestampOutputFormat))
 	if !f.bareStrings {
 		buf.WriteByte('\'')
 	}
@@ -1683,11 +1704,8 @@ func (d *DTuple) Next() (Datum, bool) {
 			res.D[i] = nextVal
 			break
 		}
-		minVal, ok := res.D[i].min()
-		if !ok {
-			return nil, false
-		}
-		res.D[i] = minVal
+		// TODO(#12022): temporary workaround; see the interface comment.
+		res.D[i] = DNull
 	}
 	return res, true
 }
@@ -2001,14 +2019,14 @@ func (*DArray) AmbiguousFormat() bool { return false }
 
 // Format implements the NodeFormatter interface.
 func (d *DArray) Format(buf *bytes.Buffer, f FmtFlags) {
-	buf.WriteByte('{')
+	buf.WriteString("ARRAY[")
 	for i, v := range d.Array {
 		if i > 0 {
 			buf.WriteString(",")
 		}
 		FormatNode(buf, f, v)
 	}
-	buf.WriteByte('}')
+	buf.WriteByte(']')
 }
 
 // Len returns the length of the Datum array.
@@ -2062,6 +2080,11 @@ func (d *DArray) Append(v Datum) error {
 // for details.
 type DTable struct {
 	ValueGenerator
+}
+
+// EmptyDTable returns a new, empty DTable.
+func EmptyDTable() *DTable {
+	return &DTable{&arrayValueGenerator{array: NewDArray(TypeAny)}}
 }
 
 // AmbiguousFormat implements the Datum interface.

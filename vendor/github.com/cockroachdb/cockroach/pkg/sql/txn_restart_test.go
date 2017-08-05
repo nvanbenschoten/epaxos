@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/lib/pq"
 	"github.com/pkg/errors"
@@ -510,7 +511,7 @@ CREATE TABLE t.test (k INT PRIMARY KEY, v TEXT, t DECIMAL);
 	// server to panic (and thus the test to fail) when the connection
 	// is closed.
 	//
-	// TODO(knz) This test can be made more robust by exposing the
+	// TODO(knz): This test can be made more robust by exposing the
 	// current allocation count in monitor and checking that it has the
 	// same value at the beginning of each retry.
 	if _, err := sqlDB.Exec(`
@@ -924,86 +925,6 @@ CREATE DATABASE t; CREATE TABLE t.test (k INT PRIMARY KEY, v TEXT);
 	}
 }
 
-// TestRollbackToSavepointStatement tests that issuing a RESTART outside of a
-// txn produces the proper error.
-func TestRollbackToSavepointStatement(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	params, _ := createTestServerParams()
-	s, sqlDB, _ := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(context.TODO())
-
-	// ROLLBACK TO SAVEPOINT with a wrong name
-	_, err := sqlDB.Exec("ROLLBACK TO SAVEPOINT foo")
-	if !testutils.IsError(err, "SAVEPOINT not supported except for COCKROACH_RESTART") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	tx, err := sqlDB.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec("SAVEPOINT cockroach_restart"); err != nil {
-		t.Fatal(err)
-	}
-	// ROLLBACK TO SAVEPOINT with an "empty" transaction.
-	if _, err := sqlDB.Exec("ROLLBACK TO SAVEPOINT cockroach_restart"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec("BOGUS SQL STATEMENT"); !testutils.IsError(err, `syntax error at or near "BOGUS"`) {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if _, err := tx.Exec("ROLLBACK TO SAVEPOINT cockroach_restart"); !testutils.IsError(
-		err, "SAVEPOINT COCKROACH_RESTART has not been used or a non-retriable error was encountered",
-	) {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if err := tx.Rollback(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestNonRetriableError checks that a non-retriable error (e.g. duplicate key)
-// doesn't leave the txn in a restartable state.
-func TestNonRetriableError(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	params, _ := createTestServerParams()
-	s, sqlDB, _ := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(context.TODO())
-
-	if _, err := sqlDB.Exec(`
-CREATE DATABASE t;
-CREATE TABLE t.test (k INT PRIMARY KEY, v TEXT);
-`); err != nil {
-		t.Fatal(err)
-	}
-
-	var tx *gosql.Tx
-	var err error
-	if tx, err = sqlDB.Begin(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec("SAVEPOINT cockroach_restart"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec("INSERT INTO t.test (k, v) VALUES (0, 'test')"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec("INSERT INTO t.test (k, v) VALUES (0, 'test')"); !testutils.IsError(err, "duplicate key value") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if _, err := tx.Exec("ROLLBACK TO SAVEPOINT cockroach_restart"); !testutils.IsError(
-		err, "SAVEPOINT COCKROACH_RESTART has not been used or a non-retriable error "+
-			"was encountered: current transaction is aborted, commands ignored until "+
-			"end of transaction block") {
-		t.Fatal(err)
-	}
-	if err = tx.Rollback(); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // TestRollbackInRestartWait ensures that a ROLLBACK while the txn is in the
 // RetryWait state works.
 func TestRollbackInRestartWait(t *testing.T) {
@@ -1051,6 +972,55 @@ CREATE TABLE t.test (k INT PRIMARY KEY, v TEXT);
 	if _, err := tx.Exec("RELEASE SAVEPOINT cockroach_restart"); !testutils.IsError(
 		err, "pq: restart transaction") {
 		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUnexpectedStatementInRestartWait ensures that a statement other than
+// ROLLBACK [TO SAVEPOINT] while the txn is in the RetryWait state terminates
+// the transaction. More importantly than the state in which the transaction
+// transitions when this happens is that this test prevents a regression of
+// #15412, whereby the server would crash in this situation.
+func TestUnexpectedStatementInRestartWait(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	params, _ := createTestServerParams()
+	s, sqlDB, _ := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(context.TODO())
+
+	tx, err := sqlDB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := tx.Exec("SAVEPOINT cockroach_restart"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(
+		"SELECT CRDB_INTERNAL.FORCE_RETRY('1s':::INTERVAL)"); !testutils.IsError(
+		err, `forced by crdb_internal\.force_retry\(\)`) {
+		t.Fatal(err)
+	}
+	var state string
+	if err := tx.QueryRow("SHOW TRANSACTION STATUS").Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "RestartWait" {
+		t.Fatalf("expected state %s, got: %s", "RestartWait", state)
+	}
+
+	if _, err := tx.Exec("SELECT 1"); !testutils.IsError(err,
+		`pq: Expected "ROLLBACK TO SAVEPOINT COCKROACH_RESTART": `+
+			"current transaction is aborted, commands ignored until end of transaction block") {
+		t.Fatal(err)
+	}
+	if err := tx.QueryRow("SHOW TRANSACTION STATUS").Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "Aborted" {
+		t.Fatalf("expected state %s, got: %s", "Aborted", state)
 	}
 	if err := tx.Rollback(); err != nil {
 		t.Fatal(err)
@@ -1236,6 +1206,7 @@ INSERT INTO t.test (k, v) VALUES ('test_key', 'test_val');
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	// We're going to use FORCE_RETRY() to generate an error for a different
 	// transaction than the one we initiate. We need call that function in a
 	// transaction that already has an id (so, it can't be the first query in the
@@ -1250,9 +1221,183 @@ INSERT INTO t.test (k, v) VALUES ('test_key', 'test_val');
 	if isRetryableErr(err) {
 		t.Fatalf("expected non-retryable error, got: %s", err)
 	}
-	if !testutils.IsError(err, "pq: retryable error from another txn: forced by crdb_internal.force_retry()") {
+	if !testutils.IsError(err, "pq: retryable error from another txn.* forced by crdb_internal.force_retry()") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Test that retryable errors are handled properly through DistSQL.
+func TestDistSQLRetryableError(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	// One of the rows in the table.
+	targetKey := roachpb.Key("\273\211\212")
+
+	restarted := true
+
+	tc := serverutils.StartTestCluster(t, 3, /* numNodes */
+		base.TestClusterArgs{
+			ReplicationMode: base.ReplicationManual,
+			ServerArgs: base.TestServerArgs{
+				UseDatabase: "test",
+				Knobs: base.TestingKnobs{
+					Store: &storage.StoreTestingKnobs{
+						TestingEvalFilter: func(fArgs storagebase.FilterArgs) *roachpb.Error {
+							_, ok := fArgs.Req.(*roachpb.ScanRequest)
+							if ok && fArgs.Req.Header().Key.Equal(targetKey) && fArgs.Hdr.Txn.Epoch == 0 {
+								restarted = true
+								err := roachpb.NewReadWithinUncertaintyIntervalError(
+									fArgs.Hdr.Timestamp, /* readTS */
+									hlc.Timestamp{})
+								errTxn := fArgs.Hdr.Txn.Clone()
+								errTxn.UpdateObservedTimestamp(roachpb.NodeID(2), hlc.Timestamp{})
+								pErr := roachpb.NewErrorWithTxn(err, &errTxn)
+								pErr.OriginNode = 2
+								return pErr
+							}
+
+							return nil
+						},
+					},
+				},
+			},
+		})
+	defer tc.Stopper().Stop(context.TODO())
+
+	db := tc.ServerConn(0)
+	sqlutils.CreateTable(t, db, "t",
+		"num INT PRIMARY KEY",
+		3, /* numRows */
+		sqlutils.ToRowFn(sqlutils.RowIdxFn))
+
+	// We're going to split one of the tables, but node 4 is unaware of this.
+	_, err := db.Exec(fmt.Sprintf(`
+	ALTER TABLE "t" SPLIT AT VALUES (1), (2), (3);
+	ALTER TABLE "t" TESTING_RELOCATE VALUES (ARRAY[%d], 1), (ARRAY[%d], 2), (ARRAY[%d], 3);
+	`,
+		tc.Server(1).GetFirstStoreID(),
+		tc.Server(0).GetFirstStoreID(),
+		tc.Server(2).GetFirstStoreID()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db.SetMaxOpenConns(1)
+
+	if _, err := db.Exec("SET DISTSQL = ALWAYS"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Test that a stand-alone statement is retried by the Executor.
+	if _, err := db.Exec("SELECT COUNT(1) FROM t"); err != nil {
+		t.Fatal(err)
+	}
+	if !restarted {
+		t.Fatalf("expected the EvalFilter to restart the txn, but it didn't")
+	}
+
+	// Test that a command that can't be retried automatically generates an error
+	// with the correct code.
+	restarted = false
+
+	txn, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = txn.Exec("SELECT COUNT(1) FROM t")
+	if !restarted {
+		t.Fatalf("expected the EvalFilter to restart the txn, but it didn't")
+	}
+	if err == nil {
+		t.Fatal("expected retryable error")
+	}
+	if !isRetryableErr(err) {
+		t.Fatalf("expected retryable error, got: %s", err)
+	}
+
+	if err := txn.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRollbackToSavepointFromUnusualStates tests that issuing a ROLLBACK TO
+// SAVEPOINT from a non-retryable state works, and that the transaction that it
+// opens has the same attributes as the existing one.
+func TestRollbackToSavepointFromUnusualStates(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	params, _ := createTestServerParams()
+	s, sqlDB, _ := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(context.TODO())
+
+	checkState := func(tx *gosql.Tx, ts time.Time) {
+		r := tx.QueryRow("SHOW TRANSACTION ISOLATION LEVEL")
+		var iso string
+		var pri string
+		if err := r.Scan(&iso); err != nil {
+			t.Fatal(err)
+		} else {
+			if iso != "SNAPSHOT" {
+				t.Errorf("Expected SNAPSHOT, got: %s", iso)
+			}
+		}
+		r = tx.QueryRow("SHOW TRANSACTION PRIORITY")
+		if err := r.Scan(&pri); err != nil {
+			t.Fatal(err)
+		} else {
+			if pri != "HIGH" {
+				t.Errorf("Expected HIGH, got: %s", pri)
+			}
+		}
+	}
+
+	// ROLLBACK TO SAVEPOINT with a wrong name
+	_, err := sqlDB.Exec("ROLLBACK TO SAVEPOINT foo")
+	if !testutils.IsError(err, "SAVEPOINT not supported except for COCKROACH_RESTART") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tx, err := sqlDB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("SET TRANSACTION ISOLATION LEVEL SNAPSHOT"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("SET TRANSACTION PRIORITY HIGH"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("SAVEPOINT cockroach_restart"); err != nil {
+		t.Fatal(err)
+	}
+
+	var ts time.Time
+	r := tx.QueryRow("SELECT NOW()")
+	if err := r.Scan(&ts); err != nil {
+		t.Fatal(err)
+	}
+
+	checkState(tx, ts)
+
+	// ROLLBACK TO SAVEPOINT from an Open txn should work.
+	if _, err := tx.Exec("ROLLBACK TO SAVEPOINT cockroach_restart"); err != nil {
+		t.Fatal(err)
+	}
+	checkState(tx, ts)
+
+	// ROLLBACK TO SAVEPOINT from an Aborted txn should work.
+	if _, err := tx.Exec("BOGUS SQL STATEMENT"); !testutils.IsError(err, `syntax error at or near "bogus"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := tx.Exec("ROLLBACK TO SAVEPOINT cockroach_restart"); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	checkState(tx, ts)
+
 	if err := tx.Rollback(); err != nil {
 		t.Fatal(err)
 	}

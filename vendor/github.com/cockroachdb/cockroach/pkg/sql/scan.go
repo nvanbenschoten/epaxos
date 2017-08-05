@@ -46,7 +46,7 @@ type scanNode struct {
 	// The table columns, possibly including ones currently in schema changes.
 	cols []sqlbase.ColumnDescriptor
 	// There is a 1-1 correspondence between cols and resultColumns.
-	resultColumns ResultColumns
+	resultColumns sqlbase.ResultColumns
 	// Contains values for the current row. There is a 1-1 correspondence
 	// between resultColumns and values in row.
 	row parser.Datums
@@ -70,7 +70,7 @@ type scanNode struct {
 	ordering         orderingInfo
 
 	explain   explainMode
-	rowIndex  int // the index of the current row
+	rowIndex  int64 // the index of the current row
 	debugVals debugValues
 
 	// filter that can be evaluated using only this table/index; it contains
@@ -105,7 +105,7 @@ func (p *planner) Scan() *scanNode {
 	return &scanNode{p: p}
 }
 
-func (n *scanNode) Columns() ResultColumns {
+func (n *scanNode) Columns() sqlbase.ResultColumns {
 	return n.resultColumns
 }
 
@@ -176,8 +176,12 @@ func (n *scanNode) limitHint() int64 {
 
 // debugNext is a helper function used by Next() when in explainDebug mode.
 func (n *scanNode) debugNext(ctx context.Context) (bool, error) {
+	if n.hardLimit > 0 && n.rowIndex >= n.hardLimit {
+		return false, nil
+	}
+
 	// In debug mode, we output a set of debug values for each key.
-	n.debugVals.rowIdx = n.rowIndex
+	n.debugVals.rowIdx = int(n.rowIndex)
 	var err error
 	var encRow sqlbase.EncDatumRow
 	n.debugVals.key, n.debugVals.value, encRow, err = n.fetcher.NextKeyDebug(ctx)
@@ -222,7 +226,7 @@ func (n *scanNode) Next(ctx context.Context) (bool, error) {
 	}
 
 	// We fetch one row at a time until we find one that passes the filter.
-	for {
+	for n.hardLimit == 0 || n.rowIndex < n.hardLimit {
 		var err error
 		n.row, err = n.fetcher.NextRowDecoded(ctx)
 		if err != nil || n.row == nil {
@@ -233,9 +237,11 @@ func (n *scanNode) Next(ctx context.Context) (bool, error) {
 			return false, err
 		}
 		if passesFilter {
+			n.rowIndex++
 			return true, nil
 		}
 	}
+	return false, nil
 }
 
 // Initializes a scanNode with a table descriptor.
@@ -374,7 +380,7 @@ func (n *scanNode) initDescDefaults(
 			}
 		}
 	}
-	n.resultColumns = makeResultColumns(n.cols)
+	n.resultColumns = sqlbase.ResultColumnsFromColDescs(n.cols)
 	n.colIdxMap = make(map[sqlbase.ColumnID]int, len(n.cols))
 	for i, c := range n.cols {
 		n.colIdxMap[c.ID] = i
@@ -443,8 +449,8 @@ func (n *scanNode) IndexedVarResolvedType(idx int) parser.Type {
 	return n.resultColumns[idx].Typ
 }
 
-func (n *scanNode) IndexedVarFormat(buf *bytes.Buffer, _ parser.FmtFlags, idx int) {
-	buf.WriteString(n.resultColumns[idx].Name)
+func (n *scanNode) IndexedVarFormat(buf *bytes.Buffer, f parser.FmtFlags, idx int) {
+	parser.Name(n.resultColumns[idx].Name).Format(buf, f)
 }
 
 // scanVisibility represents which table columns should be included in a scan.

@@ -27,6 +27,7 @@ import (
 	"github.com/cockroachdb/apd"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -143,10 +144,13 @@ func (p *planner) toSettingString(
 		return f(d)
 	}
 
-	switch setting.(type) {
+	switch setting := setting.(type) {
 	case *settings.StringSetting:
 		return typeCheckAndParse(parser.TypeString, func(d parser.Datum) (string, error) {
 			if s, ok := d.(*parser.DString); ok {
+				if err := setting.Validate(string(*s)); err != nil {
+					return "", err
+				}
 				return string(*s), nil
 			}
 			return "", errors.Errorf("cannot use %s %T value for string setting", d.ResolvedType(), d)
@@ -161,6 +165,9 @@ func (p *planner) toSettingString(
 	case *settings.IntSetting:
 		return typeCheckAndParse(parser.TypeInt, func(d parser.Datum) (string, error) {
 			if i, ok := d.(*parser.DInt); ok {
+				if err := setting.Validate(int64(*i)); err != nil {
+					return "", err
+				}
 				return settings.EncodeInt(int64(*i)), nil
 			}
 			return "", errors.Errorf("cannot use %s %T value for int setting", d.ResolvedType(), d)
@@ -168,15 +175,39 @@ func (p *planner) toSettingString(
 	case *settings.FloatSetting:
 		return typeCheckAndParse(parser.TypeFloat, func(d parser.Datum) (string, error) {
 			if f, ok := d.(*parser.DFloat); ok {
+				if err := setting.Validate(float64(*f)); err != nil {
+					return "", err
+				}
 				return settings.EncodeFloat(float64(*f)), nil
 			}
 			return "", errors.Errorf("cannot use %s %T value for float setting", d.ResolvedType(), d)
+		})
+	case *settings.EnumSetting:
+		return typeCheckAndParse(parser.TypeAny, func(d parser.Datum) (string, error) {
+			if i, intOK := d.(*parser.DInt); intOK {
+				v, ok := setting.ParseEnum(settings.EncodeInt(int64(*i)))
+				if ok {
+					return settings.EncodeInt(v), nil
+				}
+				return "", errors.Errorf("invalid integer value '%d' for enum setting", *i)
+			} else if s, ok := d.(*parser.DString); ok {
+				str := string(*s)
+				v, ok := setting.ParseEnum(str)
+				if ok {
+					return settings.EncodeInt(v), nil
+				}
+				return "", errors.Errorf("invalid string value '%s' for enum setting", str)
+			}
+			return "", errors.Errorf("cannot use %s %T value for enum setting, must be int or string", d.ResolvedType(), d)
 		})
 	case *settings.ByteSizeSetting:
 		return typeCheckAndParse(parser.TypeString, func(d parser.Datum) (string, error) {
 			if s, ok := d.(*parser.DString); ok {
 				bytes, err := humanizeutil.ParseBytes(string(*s))
 				if err != nil {
+					return "", err
+				}
+				if err := setting.Validate(bytes); err != nil {
 					return "", err
 				}
 				return settings.EncodeInt(bytes), nil
@@ -189,7 +220,11 @@ func (p *planner) toSettingString(
 				if f.Duration.Months > 0 || f.Duration.Days > 0 {
 					return "", errors.Errorf("cannot use day or month specifiers: %s", d.String())
 				}
-				return settings.EncodeDuration(time.Duration(f.Duration.Nanos) * time.Nanosecond), nil
+				d := time.Duration(f.Duration.Nanos) * time.Nanosecond
+				if err := setting.Validate(d); err != nil {
+					return "", err
+				}
+				return settings.EncodeDuration(d), nil
 			}
 			return "", errors.Errorf("cannot use %s %T value for duration setting", d.ResolvedType(), d)
 		})
@@ -245,7 +280,14 @@ func (p *planner) SetTimeZone(n *parser.SetTimeZone) (planNode, error) {
 		location := string(*v)
 		loc, err = timeutil.LoadLocation(location)
 		if err != nil {
-			return nil, fmt.Errorf("cannot find time zone %q: %v", location, err)
+			var err1 error
+			loc, err1 = timeutil.LoadLocation(strings.ToUpper(location))
+			if err1 != nil {
+				loc, err1 = timeutil.LoadLocation(strings.ToTitle(location))
+				if err1 != nil {
+					return nil, fmt.Errorf("cannot find time zone %q: %v", location, err)
+				}
+			}
 		}
 
 	case *parser.DInterval:
@@ -274,7 +316,7 @@ func (p *planner) SetTimeZone(n *parser.SetTimeZone) (planNode, error) {
 		return nil, fmt.Errorf("bad time zone value: %v", n.Value)
 	}
 	if loc == nil {
-		loc = time.FixedZone(d.String(), int(offset))
+		loc = sqlbase.FixedOffsetTimeZoneToLocation(int(offset), d.String())
 	}
 	p.session.Location = loc
 	return &emptyNode{}, nil

@@ -45,7 +45,7 @@ import (
 // Default constants for timeouts.
 const (
 	defaultClientTimeout     = 10 * time.Second
-	defaultPendingRPCTimeout = 500 * time.Millisecond
+	defaultPendingRPCTimeout = 1 * time.Second
 
 	// The default maximum number of ranges to return from a range
 	// lookup.
@@ -626,7 +626,7 @@ func (ds *DistSender) Send(
 		if err != nil {
 			return nil, roachpb.NewError(err)
 		}
-		rpl, pErr := ds.divideAndSendBatchToRanges(ctx, ba, rs, true /* isFirst */)
+		rpl, pErr := ds.divideAndSendBatchToRanges(ctx, ba, rs, 0 /* batchIdx */)
 
 		if pErr == errNo1PCTxn {
 			// If we tried to send a single round-trip EndTransaction but
@@ -668,11 +668,12 @@ type response struct {
 // divideAndSendBatchToRanges sends the supplied batch to all of the
 // ranges which comprise the span specified by rs. The batch request
 // is trimmed against each range which is part of the span and sent
-// either serially or in parallel, if possible. isFirst indicates
-// whether this is the first time this method has been called on the
-// batch. It's specified false where this method is invoked recursively.
+// either serially or in parallel, if possible. batchIdx indicates
+// which partial fragment of the larger batch is being processed by
+// this method. It's specified as non-zero when this method is invoked
+// recursively.
 func (ds *DistSender) divideAndSendBatchToRanges(
-	ctx context.Context, ba roachpb.BatchRequest, rs roachpb.RSpan, isFirst bool,
+	ctx context.Context, ba roachpb.BatchRequest, rs roachpb.RSpan, batchIdx int,
 ) (br *roachpb.BatchResponse, pErr *roachpb.Error) {
 	// This function builds a channel of responses for each range
 	// implicated in the span (rs) and combines them into a single
@@ -744,7 +745,7 @@ func (ds *DistSender) divideAndSendBatchToRanges(
 		responseCh := make(chan response, 1)
 		responseChs = append(responseChs, responseCh)
 
-		if isFirst && ri.NeedAnother(rs) {
+		if batchIdx == 0 && ri.NeedAnother(rs) {
 			// TODO(tschottdorf): we should have a mechanism for discovering
 			// range merges (descriptor staleness will mostly go unnoticed),
 			// or we'll be turning single-range queries into multi-range
@@ -799,7 +800,7 @@ func (ds *DistSender) divideAndSendBatchToRanges(
 		// can reserve one of the limited goroutines available for parallel
 		// batch RPCs, send asynchronously.
 		if ba.MaxSpanRequestKeys == 0 && ri.NeedAnother(rs) && ds.rpcContext != nil &&
-			ds.sendPartialBatchAsync(ctx, ba, rs, ri.Desc(), ri.Token(), isFirst, responseCh) {
+			ds.sendPartialBatchAsync(ctx, ba, rs, ri.Desc(), ri.Token(), batchIdx, responseCh) {
 			// Note that we pass the batch request by value to the parallel
 			// goroutine to avoid using the cloned txn.
 
@@ -811,7 +812,7 @@ func (ds *DistSender) divideAndSendBatchToRanges(
 		} else {
 			// Send synchronously if there is no parallel capacity left, there's a
 			// max results limit, or this is the final request in the span.
-			resp := ds.sendPartialBatch(ctx, ba, rs, ri.Desc(), ri.Token(), isFirst)
+			resp := ds.sendPartialBatch(ctx, ba, rs, ri.Desc(), ri.Token(), batchIdx)
 			responseCh <- resp
 			if resp.pErr != nil {
 				return
@@ -846,7 +847,7 @@ func (ds *DistSender) divideAndSendBatchToRanges(
 		if !ri.NeedAnother(rs) || !nextRS.Key.Less(nextRS.EndKey) {
 			return
 		}
-		isFirst = false // next range will not be first!
+		batchIdx++
 		rs = nextRS
 	}
 
@@ -867,13 +868,13 @@ func (ds *DistSender) sendPartialBatchAsync(
 	rs roachpb.RSpan,
 	desc *roachpb.RangeDescriptor,
 	evictToken *EvictionToken,
-	isFirst bool,
+	batchIdx int,
 	responseCh chan response,
 ) bool {
 	if err := ds.rpcContext.Stopper.RunLimitedAsyncTask(
 		ctx, ds.asyncSenderSem, false /* !wait */, func(ctx context.Context) {
 			atomic.AddInt32(&ds.asyncSenderCount, 1)
-			responseCh <- ds.sendPartialBatch(ctx, ba, rs, desc, evictToken, isFirst)
+			responseCh <- ds.sendPartialBatch(ctx, ba, rs, desc, evictToken, batchIdx)
 		},
 	); err != nil {
 		return false
@@ -896,10 +897,13 @@ func (ds *DistSender) sendPartialBatch(
 	rs roachpb.RSpan,
 	desc *roachpb.RangeDescriptor,
 	evictToken *EvictionToken,
-	isFirst bool,
+	batchIdx int,
 ) response {
-	ds.metrics.PartialBatchCount.Inc(1)
-
+	if batchIdx == 1 {
+		ds.metrics.PartialBatchCount.Inc(2) // account for first batch
+	} else if batchIdx > 1 {
+		ds.metrics.PartialBatchCount.Inc(1)
+	}
 	var reply *roachpb.BatchResponse
 	var pErr *roachpb.Error
 
@@ -956,7 +960,7 @@ func (ds *DistSender) sendPartialBatch(
 		// row and the range descriptor hasn't changed, return the error
 		// to our caller.
 		switch tErr := pErr.GetDetail().(type) {
-		case *roachpb.SendError:
+		case *roachpb.SendError, *roachpb.RangeNotFoundError:
 			// We've tried all the replicas without success. Either
 			// they're all down, or we're using an out-of-date range
 			// descriptor. Invalidate the cache and try again with the new
@@ -994,7 +998,7 @@ func (ds *DistSender) sendPartialBatch(
 			// sending batch to just the partial span this descriptor was
 			// supposed to cover.
 			log.VEventf(ctx, 1, "likely split; resending batch to span: %s", tErr)
-			reply, pErr = ds.divideAndSendBatchToRanges(ctx, ba, intersected, isFirst)
+			reply, pErr = ds.divideAndSendBatchToRanges(ctx, ba, intersected, batchIdx)
 			return response{reply: reply, pErr: pErr}
 		}
 		break
@@ -1150,7 +1154,8 @@ func (ds *DistSender) sendToReplicas(
 	// Send the first request.
 	pending := 1
 	if log.V(2) || log.HasSpanOrEvent(ctx) {
-		log.VEventf(ctx, 2, "sending batch %s to r%d", args.Summary(), rangeID)
+		log.VEventf(ctx, 2, "r%d: sending batch %s to %s",
+			rangeID, args.Summary(), transport.NextReplica())
 	}
 	transport.SendNext(ctx, done)
 
@@ -1175,7 +1180,7 @@ func (ds *DistSender) sendToReplicas(
 			// On successive RPC timeouts, send to additional replicas if available.
 			if !transport.IsExhausted() {
 				ds.metrics.SendNextTimeoutCount.Inc(1)
-				log.VEventf(ctx, 2, "timeout, trying next peer")
+				log.VEventf(ctx, 2, "timeout, trying next peer: %s", transport.NextReplica())
 				pending++
 				transport.SendNext(ctx, done)
 			}
@@ -1190,10 +1195,13 @@ func (ds *DistSender) sendToReplicas(
 			pending--
 			err := call.Err
 			if err == nil {
+				// Determine whether the error must be propagated immediately or whether
+				// sending can continue to alternate replicas.
+				propagateError := false
 				switch tErr := call.Reply.Error.GetDetail().(type) {
 				case nil:
 					return call.Reply, nil
-				case *roachpb.RangeNotFoundError, *roachpb.StoreNotFoundError, *roachpb.NodeUnavailableError:
+				case *roachpb.StoreNotFoundError, *roachpb.NodeUnavailableError:
 					// These errors are likely to be unique to the replica that reported
 					// them, so no action is required before the next retry.
 				case *roachpb.NotLeaseHolderError:
@@ -1202,10 +1210,24 @@ func (ds *DistSender) sendToReplicas(
 						// If the replica we contacted knows the new lease holder, update the cache.
 						ds.updateLeaseHolderCache(ctx, rangeID, *lh)
 
-						// Move the new lease holder to the head of the queue for the next retry.
-						transport.MoveToFront(*lh)
+						// If the implicated leaseholder is not a known replica,
+						// return a RangeNotFoundError to signal eviction of the
+						// cached RangeDescriptor and re-send.
+						if replicas.FindReplica(lh.StoreID) == -1 {
+							// Replace NotLeaseHolderError with RangeNotFoundError.
+							log.ErrEventf(ctx, "reported lease holder %s not in replicas slice %+v", lh, replicas)
+							call.Reply.Error = roachpb.NewError(roachpb.NewRangeNotFoundError(rangeID))
+							propagateError = true
+						} else {
+							// Move the new lease holder to the head of the queue for the next retry.
+							transport.MoveToFront(*lh)
+						}
 					}
 				default:
+					propagateError = true
+				}
+
+				if propagateError {
 					// The error received is not specific to this replica, so we
 					// should return it instead of trying other replicas. However,
 					// if we're trying to commit a transaction and there are
@@ -1213,25 +1235,25 @@ func (ds *DistSender) sendToReplicas(
 					// was already received, we must return an ambiguous commit
 					// error instead of returned error.
 					log.ErrEventf(ctx, "application error: %s", call.Reply.Error)
-					if haveCommit {
-						timer := time.NewTimer(defaultPendingRPCTimeout)
-						defer timer.Stop()
-						// If there are still pending RPC(s), try to wait them out.
-						for timedOut := false; pending > 0 && !timedOut; {
-							select {
-							case pendingCall := <-done:
-								pending--
-								if err := pendingCall.Err; err != nil {
-									if grpc.Code(err) != codes.Unavailable {
-										ambiguousResult = true
-									}
-								} else if pendingCall.Reply.Error == nil {
-									return pendingCall.Reply, nil
+					timer := time.NewTimer(defaultPendingRPCTimeout)
+					defer timer.Stop()
+					// If there are still pending RPC(s), try to wait them out.
+					for timedOut := false; pending > 0 && !timedOut; {
+						select {
+						case pendingCall := <-done:
+							pending--
+							if err := pendingCall.Err; err != nil {
+								if grpc.Code(err) != codes.Unavailable {
+									ambiguousResult = true
 								}
-							case <-timer.C:
-								timedOut = true
+							} else if pendingCall.Reply.Error == nil {
+								return pendingCall.Reply, nil
 							}
+						case <-timer.C:
+							timedOut = true
 						}
+					}
+					if haveCommit {
 						if pending > 0 || ambiguousResult {
 							log.ErrEventf(ctx, "returning ambiguous result (pending=%d)", pending)
 							return nil, roachpb.NewAmbiguousResultError(
@@ -1283,7 +1305,7 @@ func (ds *DistSender) sendToReplicas(
 			// Send to additional replicas if available.
 			if !transport.IsExhausted() {
 				ds.metrics.NextReplicaErrCount.Inc(1)
-				log.VEventf(ctx, 2, "error, trying next peer")
+				log.VEventf(ctx, 2, "error, trying next peer: %s", transport.NextReplica())
 				pending++
 				transport.SendNext(ctx, done)
 			}

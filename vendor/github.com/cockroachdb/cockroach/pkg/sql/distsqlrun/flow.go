@@ -57,8 +57,13 @@ type FlowCtx struct {
 	// txnProto is the transaction in which kv operations performed by processors
 	// in the flow must be performed.
 	txnProto *roachpb.Transaction
-	// clientDB is a handle to the cluster. Used to run transactions.
+	// clientDB is a handle to the cluster. Used for performing requests outside
+	// of the transaction in which the flow's query is running.
 	clientDB *client.DB
+	// remoteTxnDB is a handle to the cluster that bypasses the local
+	// TxnCoordSender. Used via setupTxn() for running requests on behalf of the
+	// query's transaction.
+	remoteTxnDB *client.DB
 	// nodeID is the ID of the node on which the processors using this FlowCtx
 	// run.
 	nodeID       roachpb.NodeID
@@ -66,7 +71,11 @@ type FlowCtx struct {
 }
 
 func (flowCtx *FlowCtx) setupTxn() *client.Txn {
-	return client.NewTxnWithProto(flowCtx.clientDB, *flowCtx.txnProto)
+	txn := client.NewTxnWithProto(flowCtx.remoteTxnDB, *flowCtx.txnProto)
+	// DistSQL transactions get retryable errors that would otherwise be handled
+	// by the TxnCoordSender.
+	txn.AcceptUnhandledRetryableErrors()
+	return txn
 }
 
 type flowStatus int
@@ -265,7 +274,7 @@ func (f *Flow) setupFlow(ctx context.Context, spec *FlowSpec) error {
 					streams[i] = rowChan
 				}
 				var err error
-				sync, err = makeOrderedSync(convertToColumnOrdering(is.Ordering), streams)
+				sync, err = makeOrderedSync(convertToColumnOrdering(is.Ordering), &f.evalCtx, streams)
 				if err != nil {
 					return err
 				}
@@ -324,6 +333,8 @@ func (f *Flow) Cleanup(ctx context.Context) {
 	if f.status == FlowFinished {
 		panic("flow cleanup called twice")
 	}
+	// This closes the account and monitor opened in ServerImpl.setupFlow
+	f.evalCtx.Mon.Stop(ctx)
 	if log.V(1) {
 		log.Infof(ctx, "cleaning up")
 	}

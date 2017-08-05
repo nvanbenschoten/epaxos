@@ -39,7 +39,9 @@ import (
 	"github.com/cockroachdb/apd"
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
@@ -103,15 +105,22 @@ type Builtin struct {
 	// in separate statements, and should not be marked as impure.
 	impure bool
 
-	// Set to true when a function depends on data stored in the EvalContext, e.g.
-	// statement_timestamp. Currently used for DistSQL to determine if expressions
-	// can be evaluated on a different node without sending over the EvalContext.
-	ctxDependent bool
+	// Set to true when a function depends on members of the EvalContext that are
+	// not marshalled by DistSQL (e.g. planner). Currently used for DistSQL to
+	// determine if expressions can be evaluated on a different node without
+	// sending over the EvalContext.
+	//
+	// TODO(andrei): Get rid of the planner from the EvalContext and then we can
+	// get rid of this blacklist.
+	distsqlBlacklist bool
 
 	// Set to true when a function may change at every row whether or
 	// not it is applied to an expression that contains row-dependent
 	// variables. Used e.g. by `random` and aggregate functions.
 	needsRepeatedEvaluation bool
+
+	// Set to true when the built-in can only be used by security.RootUser.
+	privileged bool
 
 	class    FunctionClass
 	category string
@@ -183,10 +192,10 @@ func (b Builtin) Impure() bool {
 	return b.impure
 }
 
-// ContextDependent returns true if this builtin depends on data stored in the
-// EvalContext.
-func (b Builtin) ContextDependent() bool {
-	return b.ctxDependent
+// DistSQLBlacklist returns true if the builtin is not supported by DistSQL.
+// See distsqlBlacklist.
+func (b Builtin) DistSQLBlacklist() bool {
+	return b.distsqlBlacklist
 }
 
 // FixedReturnType returns a fixed type that the function returns, returning Any
@@ -225,6 +234,8 @@ func init() {
 		funDefs[uname] = funDefs[name]
 	}
 }
+
+var digitNames = []string{"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"}
 
 // Builtins contains the built-in functions indexed by name.
 var Builtins = map[string][]Builtin{
@@ -417,8 +428,9 @@ var Builtins = map[string][]Builtin{
 
 	"repeat": {
 		Builtin{
-			Types:      ArgTypes{{"input", TypeString}, {"repeat_counter", TypeInt}},
-			ReturnType: fixedReturnType(TypeString),
+			Types:            ArgTypes{{"input", TypeString}, {"repeat_counter", TypeInt}},
+			distsqlBlacklist: true,
+			ReturnType:       fixedReturnType(TypeString),
 			fn: func(_ *EvalContext, args Datums) (_ Datum, err error) {
 				s := string(MustBeDString(args[0]))
 				count := int(MustBeDInt(args[1]))
@@ -876,9 +888,8 @@ var Builtins = map[string][]Builtin{
 
 	"age": {
 		Builtin{
-			Types:        ArgTypes{{"val", TypeTimestampTZ}},
-			ReturnType:   fixedReturnType(TypeInterval),
-			ctxDependent: true,
+			Types:      ArgTypes{{"val", TypeTimestampTZ}},
+			ReturnType: fixedReturnType(TypeInterval),
 			fn: func(ctx *EvalContext, args Datums) (Datum, error) {
 				return timestampMinusBinOp.fn(ctx, ctx.GetTxnTimestamp(time.Microsecond), args[0])
 			},
@@ -896,9 +907,8 @@ var Builtins = map[string][]Builtin{
 
 	"current_date": {
 		Builtin{
-			Types:        ArgTypes{},
-			ReturnType:   fixedReturnType(TypeDate),
-			ctxDependent: true,
+			Types:      ArgTypes{},
+			ReturnType: fixedReturnType(TypeDate),
 			fn: func(ctx *EvalContext, args Datums) (Datum, error) {
 				t := ctx.GetTxnTimestamp(time.Microsecond).Time
 				return NewDDateFromTime(t, ctx.GetLocation()), nil
@@ -917,17 +927,15 @@ var Builtins = map[string][]Builtin{
 			ReturnType:        fixedReturnType(TypeTimestampTZ),
 			preferredOverload: true,
 			impure:            true,
-			ctxDependent:      true,
 			fn: func(ctx *EvalContext, args Datums) (Datum, error) {
 				return MakeDTimestampTZ(ctx.GetStmtTimestamp(), time.Microsecond), nil
 			},
 			Info: "Returns the current statement's timestamp.",
 		},
 		Builtin{
-			Types:        ArgTypes{},
-			ReturnType:   fixedReturnType(TypeTimestamp),
-			impure:       true,
-			ctxDependent: true,
+			Types:      ArgTypes{},
+			ReturnType: fixedReturnType(TypeTimestamp),
+			impure:     true,
 			fn: func(ctx *EvalContext, args Datums) (Datum, error) {
 				return MakeDTimestamp(ctx.GetStmtTimestamp(), time.Microsecond), nil
 			},
@@ -937,11 +945,10 @@ var Builtins = map[string][]Builtin{
 
 	"cluster_logical_timestamp": {
 		Builtin{
-			Types:        ArgTypes{},
-			ReturnType:   fixedReturnType(TypeDecimal),
-			category:     categorySystemInfo,
-			impure:       true,
-			ctxDependent: true,
+			Types:      ArgTypes{},
+			ReturnType: fixedReturnType(TypeDecimal),
+			category:   categorySystemInfo,
+			impure:     true,
 			fn: func(ctx *EvalContext, args Datums) (Datum, error) {
 				return ctx.GetClusterTimestamp(), nil
 			},
@@ -1256,7 +1263,7 @@ var Builtins = map[string][]Builtin{
 
 	"round": {
 		floatBuiltin1(func(x float64) (Datum, error) {
-			return round(x, 0)
+			return NewDFloat(DFloat(round(x))), nil
 		}, "Rounds `val` to the nearest integer using half to even (banker's) rounding."),
 		decimalBuiltin1(func(x *apd.Decimal) (Datum, error) {
 			return roundDecimal(x, 0)
@@ -1266,7 +1273,25 @@ var Builtins = map[string][]Builtin{
 			Types:      ArgTypes{{"input", TypeFloat}, {"decimal_accuracy", TypeInt}},
 			ReturnType: fixedReturnType(TypeFloat),
 			fn: func(_ *EvalContext, args Datums) (Datum, error) {
-				return round(float64(*args[0].(*DFloat)), int64(MustBeDInt(args[1])))
+				var x apd.Decimal
+				if _, err := x.SetFloat64(float64(*args[0].(*DFloat))); err != nil {
+					return nil, err
+				}
+
+				// TODO(mjibson): make sure this fits in an int32.
+				scale := int32(MustBeDInt(args[1]))
+
+				var d apd.Decimal
+				if _, err := RoundCtx.Quantize(&d, &x, -scale); err != nil {
+					return nil, err
+				}
+
+				f, err := d.Float64()
+				if err != nil {
+					return nil, err
+				}
+
+				return NewDFloat(DFloat(f)), nil
 			},
 			Info: "Keeps `decimal_accuracy` number of figures to the right of the zero position " +
 				" in `input` using half to even (banker's) rounding.",
@@ -1361,6 +1386,36 @@ var Builtins = map[string][]Builtin{
 			x.Modf(&dd.Decimal, frac)
 			return dd, nil
 		}, "Truncates the decimal values of `val`."),
+	},
+
+	"to_english": {
+		Builtin{
+			Types:      ArgTypes{{"val", TypeInt}},
+			ReturnType: fixedReturnType(TypeString),
+			fn: func(_ *EvalContext, args Datums) (Datum, error) {
+				val := int(*args[0].(*DInt))
+				var buf bytes.Buffer
+				if val < 0 {
+					buf.WriteString("minus-")
+					val = -val
+				}
+				var digits []string
+				digits = append(digits, digitNames[val%10])
+				for val > 9 {
+					val /= 10
+					digits = append(digits, digitNames[val%10])
+				}
+				for i := len(digits) - 1; i >= 0; i-- {
+					if i < len(digits)-1 {
+						buf.WriteByte('-')
+					}
+					buf.WriteString(digits[i])
+				}
+				return NewDString(buf.String()), nil
+			},
+			category: categoryString,
+			Info:     "This function enunciates the value of its argument using English cardinals.",
+		},
 	},
 
 	// Array functions.
@@ -1464,10 +1519,9 @@ var Builtins = map[string][]Builtin{
 	// and the session's database search path.
 	"current_schemas": {
 		Builtin{
-			Types:        ArgTypes{{"include_pg_catalog", TypeBool}},
-			ReturnType:   fixedReturnType(TypeStringArray),
-			category:     categorySystemInfo,
-			ctxDependent: true,
+			Types:      ArgTypes{{"include_pg_catalog", TypeBool}},
+			ReturnType: fixedReturnType(TypeStringArray),
+			category:   categorySystemInfo,
 			fn: func(ctx *EvalContext, args Datums) (Datum, error) {
 				includePgCatalog := *(args[0].(*DBool))
 				schemas := NewDArray(TypeString)
@@ -1490,18 +1544,68 @@ var Builtins = map[string][]Builtin{
 		},
 	},
 
+	"crdb_internal.force_internal_error": {
+		Builtin{
+			Types:      ArgTypes{{"msg", TypeString}},
+			ReturnType: fixedReturnType(TypeInt),
+			impure:     true,
+			privileged: true,
+			fn: func(ctx *EvalContext, args Datums) (Datum, error) {
+				msg := string(*args[0].(*DString))
+				return nil, pgerror.NewError(pgerror.CodeInternalError, msg)
+			},
+			category: categorySystemInfo,
+			Info:     "This function is used only by CockroachDB's developers for testing purposes.",
+		},
+	},
+
+	"crdb_internal.force_panic": {
+		Builtin{
+			Types:      ArgTypes{{"msg", TypeString}},
+			ReturnType: fixedReturnType(TypeInt),
+			impure:     true,
+			privileged: true,
+			fn: func(ctx *EvalContext, args Datums) (Datum, error) {
+				msg := string(*args[0].(*DString))
+				panic(msg)
+			},
+			category: categorySystemInfo,
+			Info:     "This function is used only by CockroachDB's developers for testing purposes.",
+		},
+	},
+
+	"crdb_internal.force_log_fatal": {
+		Builtin{
+			Types:      ArgTypes{{"msg", TypeString}},
+			ReturnType: fixedReturnType(TypeInt),
+			impure:     true,
+			privileged: true,
+			fn: func(ctx *EvalContext, args Datums) (Datum, error) {
+				msg := string(*args[0].(*DString))
+				log.Fatal(ctx.Ctx(), msg)
+				return nil, nil
+			},
+			category: categorySystemInfo,
+			Info:     "This function is used only by CockroachDB's developers for testing purposes.",
+		},
+	},
+
 	"crdb_internal.force_retry": {
 		Builtin{
 			Types:      ArgTypes{{"val", TypeInterval}},
 			ReturnType: fixedReturnType(TypeInt),
 			impure:     true,
+			privileged: true,
 			fn: func(ctx *EvalContext, args Datums) (Datum, error) {
 				minDuration := args[0].(*DInterval).Duration
 				elapsed := duration.Duration{
 					Nanos: int64(ctx.stmtTimestamp.Sub(ctx.txnTimestamp)),
 				}
 				if elapsed.Compare(minDuration) < 0 {
-					return nil, roachpb.NewRetryableTxnError("forced by crdb_internal.force_retry()", nil /* txnID */)
+					return nil, roachpb.NewHandledRetryableTxnError(
+						"forced by crdb_internal.force_retry()",
+						nil, /* txnID */
+						roachpb.Transaction{})
 				}
 				return DZero, nil
 			},
@@ -1525,40 +1629,13 @@ var Builtins = map[string][]Builtin{
 					if err != nil {
 						return nil, err
 					}
-					return nil, roachpb.NewRetryableTxnError("forced by crdb_internal.force_retry()", &uuid)
+					return nil, roachpb.NewHandledRetryableTxnError(
+						"forced by crdb_internal.force_retry()", &uuid, roachpb.Transaction{})
 				}
 				return DZero, nil
 			},
 			category: categorySystemInfo,
 			Info:     "This function is used only by CockroachDB's developers for testing purposes.",
-		},
-	},
-
-	// A function used to generate strings for test tables. It takes an integer
-	// and returns a string: 1234 -> "one-two-three-four"
-	"crdb_testing.to_english": {
-		Builtin{
-			Types:      ArgTypes{{"val", TypeInt}},
-			ReturnType: fixedReturnType(TypeString),
-			fn: func(_ *EvalContext, args Datums) (Datum, error) {
-				val := int(*args[0].(*DInt))
-				if val < 0 {
-					return nil, errors.New("negative value")
-				}
-				d := []string{"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"}
-				var digits []string
-				digits = append(digits, d[val%10])
-				for val > 9 {
-					val /= 10
-					digits = append(digits, d[val%10])
-				}
-				for i, j := 0, len(digits)-1; i < j; i, j = i+1, j-1 {
-					digits[i], digits[j] = digits[j], digits[i]
-				}
-				return NewDString(strings.Join(digits, "-")), nil
-			},
-			category: categoryString,
-			Info:     "Returns an English string derived from a number.",
 		},
 	},
 }
@@ -1681,17 +1758,15 @@ var txnTSImpl = []Builtin{
 		ReturnType:        fixedReturnType(TypeTimestampTZ),
 		preferredOverload: true,
 		impure:            true,
-		ctxDependent:      true,
 		fn: func(ctx *EvalContext, args Datums) (Datum, error) {
 			return ctx.GetTxnTimestamp(time.Microsecond), nil
 		},
 		Info: "Returns the current transaction's timestamp.",
 	},
 	{
-		Types:        ArgTypes{},
-		ReturnType:   fixedReturnType(TypeTimestamp),
-		impure:       true,
-		ctxDependent: true,
+		Types:      ArgTypes{},
+		ReturnType: fixedReturnType(TypeTimestamp),
+		impure:     true,
 		fn: func(ctx *EvalContext, args Datums) (Datum, error) {
 			return ctx.GetTxnTimestampNoZone(time.Microsecond), nil
 		},
@@ -1961,7 +2036,7 @@ var flagToNotByte = map[syntax.Flags]byte{
 // http://www.postgresql.org/docs/9.0/static/functions-matching.html#POSIX-EMBEDDED-OPTIONS-TABLE.
 // It then returns an adjusted regexp pattern.
 func regexpEvalFlags(pattern, sqlFlags string) (string, error) {
-	flags := syntax.DotNL
+	flags := syntax.DotNL | syntax.OneLine
 
 	for _, sqlFlag := range sqlFlags {
 		switch sqlFlag {
@@ -1972,12 +2047,12 @@ func regexpEvalFlags(pattern, sqlFlags string) (string, error) {
 		case 'c':
 			flags &^= syntax.FoldCase
 		case 's':
-			flags |= syntax.DotNL
+			flags &^= syntax.DotNL
 		case 'm', 'n':
 			flags &^= syntax.DotNL
-			flags |= syntax.OneLine
+			flags &^= syntax.OneLine
 		case 'p':
-			flags |= syntax.DotNL
+			flags &^= syntax.DotNL
 			flags |= syntax.OneLine
 		case 'w':
 			flags |= syntax.DotNL
@@ -2025,36 +2100,72 @@ func overlay(s, to string, pos, size int) (Datum, error) {
 	return NewDString(string(runes[:pos]) + to + string(runes[after:])), nil
 }
 
-func round(x float64, n int64) (Datum, error) {
-	pow := math.Pow(10, float64(n))
-
-	if pow == 0 {
-		// Rounding to so many digits on the left that we're underflowing.
-		// Avoid a NaN below.
-		return NewDFloat(DFloat(0)), nil
-	}
-	if math.Abs(x*pow) > 1e17 {
-		// Rounding touches decimals below float precision; the operation
-		// is a no-op.
-		return NewDFloat(DFloat(x)), nil
+// Transcribed from Postgres' src/port/rint.c, with c-style comments preserved
+// for ease of mapping.
+//
+// https://github.com/postgres/postgres/blob/REL9_6_3/src/port/rint.c
+func round(x float64) float64 {
+	/* Per POSIX, NaNs must be returned unchanged. */
+	if math.IsNaN(x) {
+		return x
 	}
 
-	v, frac := math.Modf(x * pow)
-	// The following computation implements unbiased rounding, also
-	// called bankers' rounding. It ensures that values that fall
-	// exactly between two integers get equal chance to be rounded up or
-	// down.
-	if x > 0.0 {
-		if frac > 0.5 || (frac == 0.5 && uint64(v)%2 != 0) {
-			v += 1.0
-		}
-	} else {
-		if frac < -0.5 || (frac == -0.5 && uint64(v)%2 != 0) {
-			v -= 1.0
-		}
+	/* Both positive and negative zero should be returned unchanged. */
+	if x == 0.0 {
+		return x
 	}
 
-	return NewDFloat(DFloat(v / pow)), nil
+	roundFn := math.Ceil
+	if math.Signbit(x) {
+		roundFn = math.Floor
+	}
+
+	/*
+	 * Subtracting 0.5 from a number very close to -0.5 can round to
+	 * exactly -1.0, producing incorrect results, so we take the opposite
+	 * approach: add 0.5 to the negative number, so that it goes closer to
+	 * zero (or at most to +0.5, which is dealt with next), avoiding the
+	 * precision issue.
+	 */
+	xOrig := x
+	x -= math.Copysign(0.5, x)
+
+	/*
+	 * Be careful to return minus zero when input+0.5 >= 0, as that's what
+	 * rint() should return with negative input.
+	 */
+	if x == 0 || math.Signbit(x) != math.Signbit(xOrig) {
+		return math.Copysign(0.0, xOrig)
+	}
+
+	/*
+	 * For very big numbers the input may have no decimals.  That case is
+	 * detected by testing x+0.5 == x+1.0; if that happens, the input is
+	 * returned unchanged.  This also covers the case of minus infinity.
+	 */
+	if x == xOrig-math.Copysign(1.0, x) {
+		return xOrig
+	}
+
+	/* Otherwise produce a rounded estimate. */
+	r := roundFn(x)
+
+	/*
+	 * If the rounding did not produce exactly input+0.5 then we're done.
+	 */
+	if r != x {
+		return r
+	}
+
+	/*
+	 * The original fractional part was exactly 0.5 (since
+	 * floor(input+0.5) == input+0.5).  We need to round to nearest even.
+	 * Dividing input+0.5 by 2, taking the floor and multiplying by 2
+	 * yields the closest even number.  This part assumes that division by
+	 * 2 is exact, which should be OK because underflow is impossible
+	 * here: x is an integer.
+	 */
+	return roundFn(x*0.5) * 2.0
 }
 
 func roundDecimal(x *apd.Decimal, n int32) (Datum, error) {

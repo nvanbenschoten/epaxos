@@ -137,9 +137,6 @@ func (s *SorterSpec) summary() (string, []string) {
 	if s.OrderingMatchLen != 0 {
 		details = append(details, fmt.Sprintf("match len: %d", s.OrderingMatchLen))
 	}
-	if s.Limit != 0 {
-		details = append(details, fmt.Sprintf("limit: %d", s.Limit))
-	}
 	return "Sorter", details
 }
 
@@ -192,7 +189,7 @@ func (post *PostProcessSpec) summary() []string {
 	if post.Filter.Expr != "" {
 		res = append(res, fmt.Sprintf("Filter: %s", post.Filter.Expr))
 	}
-	if len(post.OutputColumns) > 0 {
+	if post.Projection {
 		res = append(res, fmt.Sprintf("Out: %s", colListStr(post.OutputColumns)))
 	}
 	if len(post.RenderExprs) > 0 {

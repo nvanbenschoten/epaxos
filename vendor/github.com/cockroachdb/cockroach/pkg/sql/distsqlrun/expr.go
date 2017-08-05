@@ -39,10 +39,12 @@ func (v *ivarBinder) VisitPre(expr parser.Expr) (recurse bool, newExpr parser.Ex
 		return false, expr
 	}
 	if ivar, ok := expr.(*parser.IndexedVar); ok {
-		if err := v.h.BindIfUnbound(ivar); err != nil {
+		newVar, err := v.h.BindIfUnbound(ivar)
+		if err != nil {
 			v.err = err
+			return false, expr
 		}
-		return false, expr
+		return false, newVar
 	}
 	return true, expr
 }
@@ -62,7 +64,7 @@ func processExpression(exprSpec Expression, h *parser.IndexedVarHelper) (parser.
 
 	// Bind IndexedVars to our eh.vars.
 	v := ivarBinder{h: h, err: nil}
-	parser.WalkExprConst(&v, expr)
+	expr, _ = parser.WalkExpr(&v, expr)
 	if v.err != nil {
 		return nil, v.err
 	}
@@ -70,7 +72,7 @@ func processExpression(exprSpec Expression, h *parser.IndexedVarHelper) (parser.
 	// Convert to a fully typed expression.
 	typedExpr, err := parser.TypeCheck(expr, nil, parser.TypeAny)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, expr.String())
 	}
 
 	return typedExpr, nil

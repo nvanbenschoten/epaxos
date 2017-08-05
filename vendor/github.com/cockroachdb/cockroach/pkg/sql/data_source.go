@@ -117,7 +117,7 @@ import (
 type dataSourceInfo struct {
 	// sourceColumns match the plan.Columns() 1-to-1. However the column
 	// names might be different if the statement renames them using AS.
-	sourceColumns ResultColumns
+	sourceColumns sqlbase.ResultColumns
 
 	// sourceAliases indicates to which table alias column ranges
 	// belong.
@@ -166,7 +166,7 @@ func (src *dataSourceInfo) String() string {
 		if i > 0 {
 			buf.WriteByte('\t')
 		}
-		if c.hidden {
+		if c.Hidden {
 			buf.WriteByte('*')
 		}
 		buf.WriteString(c.Name)
@@ -233,7 +233,9 @@ func fillColumnRange(firstIdx, lastIdx int) columnRange {
 
 // newSourceInfoForSingleTable creates a simple dataSourceInfo
 // which maps the same tableAlias to all columns.
-func newSourceInfoForSingleTable(tn parser.TableName, columns ResultColumns) *dataSourceInfo {
+func newSourceInfoForSingleTable(
+	tn parser.TableName, columns sqlbase.ResultColumns,
+) *dataSourceInfo {
 	norm := tn.NormalizedTableName()
 	return &dataSourceInfo{
 		sourceColumns: columns,
@@ -326,7 +328,7 @@ func (p *planner) getDataSource(
 		return p.getGeneratorPlan(ctx, t)
 
 	case *parser.Subquery:
-		return p.getSubqueryPlan(ctx, t.Select, nil)
+		return p.getSubqueryPlan(ctx, anonymousTable, t.Select, nil)
 
 	case *parser.JoinTableExpr:
 		// Joins: two sources.
@@ -341,7 +343,7 @@ func (p *planner) getDataSource(
 		return p.makeJoin(ctx, t.Join, left, right, t.Cond)
 
 	case *parser.Explain:
-		plan, err := p.Explain(ctx, t, false)
+		plan, err := p.Explain(ctx, t)
 		if err != nil {
 			return planDataSource{}, err
 		}
@@ -394,7 +396,7 @@ func (p *planner) getDataSource(
 
 		if len(colAlias) > 0 {
 			// Make a copy of the slice since we are about to modify the contents.
-			src.info.sourceColumns = append(ResultColumns(nil), src.info.sourceColumns...)
+			src.info.sourceColumns = append(sqlbase.ResultColumns(nil), src.info.sourceColumns...)
 
 			// The column aliases can only refer to explicit columns.
 			for colIdx, aliasIdx := 0, 0; aliasIdx < len(colAlias); colIdx++ {
@@ -410,7 +412,7 @@ func (p *planner) getDataSource(
 						"source %q has %d columns available but %d columns specified",
 						srcName, aliasIdx, len(colAlias))
 				}
-				if src.info.sourceColumns[colIdx].hidden {
+				if src.info.sourceColumns[colIdx].Hidden {
 					continue
 				}
 				src.info.sourceColumns[colIdx].Name = string(colAlias[aliasIdx])
@@ -559,7 +561,7 @@ func (p *planner) getViewPlan(
 	// TODO(a-robinson): Support ORDER BY and LIMIT in views. Is it as simple as
 	// just passing the entire select here or will inserting an ORDER BY in the
 	// middle of a query plan break things?
-	plan, err := p.getSubqueryPlan(ctx, sel.Select, makeResultColumns(desc.Columns))
+	plan, err := p.getSubqueryPlan(ctx, *tn, sel.Select, sqlbase.ResultColumnsFromColDescs(desc.Columns))
 	if err != nil {
 		return plan, err
 	}
@@ -570,9 +572,9 @@ func (p *planner) getViewPlan(
 // getSubqueryPlan builds a planDataSource for a select statement, including
 // for simple VALUES statements.
 func (p *planner) getSubqueryPlan(
-	ctx context.Context, sel parser.SelectStatement, cols ResultColumns,
+	ctx context.Context, tn parser.TableName, sel parser.SelectStatement, cols sqlbase.ResultColumns,
 ) (planDataSource, error) {
-	plan, err := p.newPlan(ctx, sel, nil, false)
+	plan, err := p.newPlan(ctx, sel, nil)
 	if err != nil {
 		return planDataSource{}, err
 	}
@@ -580,7 +582,7 @@ func (p *planner) getSubqueryPlan(
 		cols = plan.Columns()
 	}
 	return planDataSource{
-		info: newSourceInfoForSingleTable(anonymousTable, cols),
+		info: newSourceInfoForSingleTable(tn, cols),
 		plan: plan,
 	}, nil
 }
@@ -602,16 +604,16 @@ func (p *planner) getGeneratorPlan(
 // expressions that correspond to the expansion of a star.
 func (src *dataSourceInfo) expandStar(
 	v parser.VarName, ivarHelper parser.IndexedVarHelper,
-) (columns ResultColumns, exprs []parser.TypedExpr, err error) {
+) (columns sqlbase.ResultColumns, exprs []parser.TypedExpr, err error) {
 	if len(src.sourceColumns) == 0 {
 		return nil, nil, fmt.Errorf("cannot use %q without a FROM clause", v)
 	}
 
 	colSel := func(idx int) {
 		col := src.sourceColumns[idx]
-		if !col.hidden {
+		if !col.Hidden {
 			ivar := ivarHelper.IndexedVar(idx)
-			columns = append(columns, ResultColumn{Name: col.Name, Typ: ivar.ResolvedType()})
+			columns = append(columns, sqlbase.ResultColumn{Name: col.Name, Typ: ivar.ResolvedType()})
 			exprs = append(exprs, ivar)
 		}
 	}
@@ -819,5 +821,5 @@ func (src *dataSourceInfo) FormatVar(buf *bytes.Buffer, f parser.FmtFlags, colId
 			buf.WriteString("_.")
 		}
 	}
-	buf.WriteString(src.sourceColumns[colIdx].Name)
+	parser.Name(src.sourceColumns[colIdx].Name).Format(buf, f)
 }

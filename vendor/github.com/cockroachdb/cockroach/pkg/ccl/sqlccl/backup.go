@@ -12,12 +12,12 @@ import (
 	"bytes"
 	"io/ioutil"
 	"sort"
-	"strings"
 
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
 	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
 	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl/intervalccl"
@@ -40,6 +40,8 @@ const (
 	// BackupDescriptorName is the file name used for serialized
 	// BackupDescriptor protos.
 	BackupDescriptorName = "BACKUP"
+	// BackupFormatInitialVersion is the first version of backup and its files.
+	BackupFormatInitialVersion uint32 = 0
 )
 
 // exportStorageFromURI returns an ExportStorage for the given URI.
@@ -203,36 +205,33 @@ func backupJobDescription(
 	backup *parser.Backup, to string, incrementalFrom []string,
 ) (string, error) {
 	b := parser.Backup{
-		AsOf:            backup.AsOf,
-		Options:         backup.Options,
-		Targets:         backup.Targets,
-		IncrementalFrom: make(parser.Exprs, len(incrementalFrom)),
+		AsOf:    backup.AsOf,
+		Options: backup.Options,
+		Targets: backup.Targets,
 	}
 
 	to, err := storageccl.SanitizeExportStorageURI(to)
 	if err != nil {
 		return "", err
 	}
-	backup.To = parser.NewDString(to)
+	b.To = parser.NewDString(to)
 
-	for i, from := range incrementalFrom {
+	for _, from := range incrementalFrom {
 		sanitizedFrom, err := storageccl.SanitizeExportStorageURI(from)
 		if err != nil {
 			return "", err
 		}
-		b.IncrementalFrom[i] = parser.NewDString(sanitizedFrom)
+		b.IncrementalFrom = append(b.IncrementalFrom, parser.NewDString(sanitizedFrom))
 	}
 
-	return backup.String(), nil
+	return b.String(), nil
 }
 
 // clusterNodeCount returns the approximate number of nodes in the cluster.
 func clusterNodeCount(g *gossip.Gossip) int {
-	const nodePrefix = gossip.KeyNodeIDPrefix + ":"
-
 	var nodes int
 	for k := range g.GetInfoStatus().Infos {
-		if strings.HasPrefix(k, nodePrefix) {
+		if gossip.IsNodeIDKey(k) {
 			nodes++
 		}
 	}
@@ -386,7 +385,7 @@ func Backup(
 	// TODO(dan): Make this limiting per node.
 	//
 	// TODO(dan): See if there's some better solution than rate-limiting #14798.
-	maxConcurrentExports := clusterNodeCount(p.ExecCfg().Gossip) * storageccl.ParallelRequestsLimit
+	maxConcurrentExports := clusterNodeCount(p.ExecCfg().Gossip) * storageccl.ExportRequestLimit
 	exportsSem := make(chan struct{}, maxConcurrentExports)
 
 	header := roachpb.Header{Timestamp: endTime}
@@ -437,12 +436,16 @@ func Backup(
 	files, dataSize := mu.files, mu.dataSize // No more concurrency, so this is safe.
 
 	desc := BackupDescriptor{
-		StartTime:   startTime,
-		EndTime:     endTime,
-		Descriptors: sqlDescs,
-		Spans:       spans,
-		Files:       files,
-		DataSize:    dataSize,
+		StartTime:     startTime,
+		EndTime:       endTime,
+		Descriptors:   sqlDescs,
+		Spans:         spans,
+		Files:         files,
+		DataSize:      dataSize,
+		FormatVersion: BackupFormatInitialVersion,
+		BuildInfo:     build.GetInfo(),
+		NodeID:        p.ExecCfg().NodeID.Get(),
+		ClusterID:     p.ExecCfg().ClusterID(),
 	}
 	sort.Sort(backupFileDescriptors(desc.Files))
 
@@ -459,7 +462,7 @@ func Backup(
 
 func backupPlanHook(
 	baseCtx context.Context, stmt parser.Statement, p sql.PlanHookState,
-) (func() ([]parser.Datums, error), sql.ResultColumns, error) {
+) (func() ([]parser.Datums, error), sqlbase.ResultColumns, error) {
 	backup, ok := stmt.(*parser.Backup)
 	if !ok {
 		return nil, nil, nil
@@ -480,7 +483,7 @@ func backupPlanHook(
 		return nil, nil, err
 	}
 
-	header := sql.ResultColumns{
+	header := sqlbase.ResultColumns{
 		{Name: "job_id", Typ: parser.TypeInt},
 		{Name: "status", Typ: parser.TypeString},
 		{Name: "fraction_completed", Typ: parser.TypeFloat},

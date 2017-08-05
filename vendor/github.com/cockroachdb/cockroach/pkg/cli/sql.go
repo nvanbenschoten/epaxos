@@ -26,7 +26,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -75,7 +74,7 @@ type cliState struct {
 	checkSyntax bool
 	// Determines whether to store normalized syntax in the shell history
 	// when check_syntax is set.
-	// TODO(knz) this can possibly be set back to false by default when
+	// TODO(knz): this can possibly be set back to false by default when
 	// the upstream readline library handles multi-line history entries
 	// properly.
 	normalizeHistory bool
@@ -263,15 +262,19 @@ var options = map[string]struct {
 // handleSet supports the \set client-side command.
 func (c *cliState) handleSet(args []string, nextState, errState cliStateEnum) cliStateEnum {
 	if len(args) == 0 {
-		printQueryOutput(os.Stdout,
+		err := printQueryOutput(os.Stdout,
 			[]string{"Option", "Value"},
-			[][]string{
+			newRowSliceIter([][]string{
 				{"display_format", cliCtx.tableDisplayFormat.String()},
 				{"errexit", strconv.FormatBool(c.errExit)},
 				{"check_syntax", strconv.FormatBool(c.checkSyntax)},
 				{"normalize_history", strconv.FormatBool(c.normalizeHistory)},
-			},
+			}),
 			"set", cliCtx.tableDisplayFormat)
+		if err != nil {
+			panic(err)
+		}
+
 		return nextState
 	}
 	opt, ok := options[args[0]]
@@ -534,14 +537,14 @@ func (c *cliState) doStart(nextState cliStateEnum) cliStateEnum {
 		// We only enable history management when the terminal is actually
 		// interactive. This saves on memory when e.g. piping a large SQL
 		// script through the command-line client.
-		userAcct, err := user.Current()
+		homeDir, err := envutil.HomeDir()
 		if err != nil {
 			if log.V(2) {
-				log.Warningf(context.TODO(), "cannot retrieve user information: %s", err)
+				log.Warningf(context.TODO(), "cannot retrieve user information: %v", err)
 				log.Info(context.TODO(), "cannot load or save the command-line history")
 			}
 		} else {
-			histFile := filepath.Join(userAcct.HomeDir, cmdHistFile)
+			histFile := filepath.Join(homeDir, cmdHistFile)
 			cfg := c.ins.Config.Clone()
 			cfg.HistoryFile = histFile
 			cfg.HistorySearchFold = true
@@ -846,7 +849,8 @@ func (c *cliState) doCheckStatement(startState, contState, execState cliStateEnu
 	// Replace the last entered lines by the last entered statements.
 	c.partialLines = c.partialLines[:c.partialStmtsLen]
 	for i := c.partialStmtsLen; i < len(parsedStmts); i++ {
-		c.partialLines = append(c.partialLines, parsedStmts[i].String()+";")
+		c.partialLines = append(c.partialLines,
+			parser.AsStringWithFlags(parsedStmts[i], parser.FmtSimpleWithPasswords)+";")
 	}
 
 	nextState := execState

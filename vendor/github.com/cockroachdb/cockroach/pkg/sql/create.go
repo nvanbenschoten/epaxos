@@ -31,6 +31,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -118,7 +119,7 @@ func (n *createDatabaseNode) Start(ctx context.Context) error {
 
 func (*createDatabaseNode) Next(context.Context) (bool, error) { return false, nil }
 func (*createDatabaseNode) Close(context.Context)              {}
-func (*createDatabaseNode) Columns() ResultColumns             { return make(ResultColumns, 0) }
+func (*createDatabaseNode) Columns() sqlbase.ResultColumns     { return make(sqlbase.ResultColumns, 0) }
 func (*createDatabaseNode) Ordering() orderingInfo             { return orderingInfo{} }
 func (*createDatabaseNode) Values() parser.Datums              { return parser.Datums{} }
 func (*createDatabaseNode) DebugValues() debugValues           { return debugValues{} }
@@ -236,7 +237,7 @@ func (n *createIndexNode) Start(ctx context.Context) error {
 
 func (*createIndexNode) Next(context.Context) (bool, error) { return false, nil }
 func (*createIndexNode) Close(context.Context)              {}
-func (*createIndexNode) Columns() ResultColumns             { return make(ResultColumns, 0) }
+func (*createIndexNode) Columns() sqlbase.ResultColumns     { return make(sqlbase.ResultColumns, 0) }
 func (*createIndexNode) Ordering() orderingInfo             { return orderingInfo{} }
 func (*createIndexNode) Values() parser.Datums              { return parser.Datums{} }
 func (*createIndexNode) DebugValues() debugValues           { return debugValues{} }
@@ -343,7 +344,7 @@ func (n *createUserNode) Start(ctx context.Context) error {
 
 func (*createUserNode) Next(context.Context) (bool, error) { return false, nil }
 func (*createUserNode) Close(context.Context)              {}
-func (*createUserNode) Columns() ResultColumns             { return make(ResultColumns, 0) }
+func (*createUserNode) Columns() sqlbase.ResultColumns     { return make(sqlbase.ResultColumns, 0) }
 func (*createUserNode) Ordering() orderingInfo             { return orderingInfo{} }
 func (*createUserNode) Values() parser.Datums              { return parser.Datums{} }
 func (*createUserNode) DebugValues() debugValues           { return debugValues{} }
@@ -385,7 +386,7 @@ func (p *planner) CreateView(ctx context.Context, n *parser.CreateView) (planNod
 	// depends on, make sure we use the most recent versions of table
 	// descriptors rather than the copies in the lease cache.
 	p.avoidCachedDescriptors = true
-	sourcePlan, err := p.Select(ctx, n.AsSource, []parser.Type{}, false)
+	sourcePlan, err := p.Select(ctx, n.AsSource, []parser.Type{})
 	if err != nil {
 		p.avoidCachedDescriptors = false
 		return nil, err
@@ -414,16 +415,16 @@ func (p *planner) CreateView(ctx context.Context, n *parser.CreateView) (planNod
 	var fmtErr error
 	n.AsSource.Format(
 		&queryBuf,
-		parser.FmtNormalizeTableNames(
+		parser.FmtReformatTableNames(
 			parser.FmtParsable,
-			func(t *parser.NormalizableTableName) *parser.TableName {
+			func(t *parser.NormalizableTableName, buf *bytes.Buffer, f parser.FmtFlags) {
 				tn, err := p.QualifyWithDatabase(ctx, t)
 				if err != nil {
 					log.Warningf(ctx, "failed to qualify table name %q with database name: %v", t, err)
 					fmtErr = err
-					return nil
+					t.TableNameReference.Format(buf, f)
 				}
-				return tn
+				tn.Format(buf, f)
 			},
 		),
 	)
@@ -468,7 +469,7 @@ func (n *createViewNode) Start(ctx context.Context) error {
 
 	affected := make(map[sqlbase.ID]*sqlbase.TableDescriptor)
 	desc, err := n.makeViewTableDesc(
-		ctx, n.n, n.dbDesc.ID, id, n.sourcePlan.Columns(), privs, affected)
+		ctx, n.n, n.dbDesc.ID, id, n.sourcePlan.Columns(), privs, affected, &n.p.evalCtx)
 	if err != nil {
 		return err
 	}
@@ -523,7 +524,7 @@ func (n *createViewNode) Close(ctx context.Context) {
 }
 
 func (*createViewNode) Next(context.Context) (bool, error) { return false, nil }
-func (*createViewNode) Columns() ResultColumns             { return make(ResultColumns, 0) }
+func (*createViewNode) Columns() sqlbase.ResultColumns     { return make(sqlbase.ResultColumns, 0) }
 func (*createViewNode) Ordering() orderingInfo             { return orderingInfo{} }
 func (*createViewNode) Values() parser.Datums              { return parser.Datums{} }
 func (*createViewNode) DebugValues() debugValues           { return debugValues{} }
@@ -575,7 +576,7 @@ func (p *planner) CreateTable(ctx context.Context, n *parser.CreateTable) (planN
 		// to populate the new table descriptor in Start() below. We
 		// instantiate the sourcePlan as early as here so that EXPLAIN has
 		// something useful to show about CREATE TABLE .. AS ...
-		sourcePlan, err = p.Select(ctx, n.AsSource, []parser.Type{}, false)
+		sourcePlan, err = p.Select(ctx, n.AsSource, []parser.Type{})
 		if err != nil {
 			return nil, err
 		}
@@ -649,7 +650,7 @@ func (n *createTableNode) Start(ctx context.Context) error {
 	var desc sqlbase.TableDescriptor
 	var affected map[sqlbase.ID]*sqlbase.TableDescriptor
 	if n.n.As() {
-		desc, err = makeTableDescIfAs(n.n, n.dbDesc.ID, id, n.sourcePlan.Columns(), privs)
+		desc, err = makeTableDescIfAs(n.n, n.dbDesc.ID, id, n.sourcePlan.Columns(), privs, &n.p.evalCtx)
 	} else {
 		affected = make(map[sqlbase.ID]*sqlbase.TableDescriptor)
 		desc, err = n.p.makeTableDesc(ctx, n.n, n.dbDesc.ID, id, privs, affected)
@@ -725,7 +726,7 @@ func (n *createTableNode) Start(ctx context.Context) error {
 			Rows:      n.n.AsSource,
 			Returning: parser.AbsentReturningClause,
 		}
-		insertPlan, err := n.p.Insert(ctx, insert, nil /* desiredTypes */, false /* autoCommit */)
+		insertPlan, err := n.p.Insert(ctx, insert, nil /* desiredTypes */)
 		if err != nil {
 			return err
 		}
@@ -758,7 +759,7 @@ func (n *createTableNode) Close(ctx context.Context) {
 }
 
 func (*createTableNode) Next(context.Context) (bool, error) { return false, nil }
-func (*createTableNode) Columns() ResultColumns             { return make(ResultColumns, 0) }
+func (*createTableNode) Columns() sqlbase.ResultColumns     { return make(sqlbase.ResultColumns, 0) }
 func (*createTableNode) Ordering() orderingInfo             { return orderingInfo{} }
 func (*createTableNode) Values() parser.Datums              { return parser.Datums{} }
 func (*createTableNode) DebugValues() debugValues           { return debugValues{} }
@@ -910,7 +911,11 @@ func resolveFK(
 			}
 		}
 		if !found {
-			return fmt.Errorf("foreign key requires table %q have a unique index on %s", targetTable.String(), colNames(targetCols))
+			return pgerror.NewErrorf(
+				pgerror.CodeInvalidForeignKeyError,
+				"there is no unique constraint matching given keys for referenced table %s",
+				targetTable.String(),
+			)
 		}
 	}
 
@@ -927,7 +932,8 @@ func resolveFK(
 
 	if matchesIndex(srcCols, tbl.PrimaryIndex, matchPrefix) {
 		if tbl.PrimaryIndex.ForeignKey.IsSet() {
-			return fmt.Errorf("columns cannot be used by multiple foreign key constraints")
+			return pgerror.NewErrorf(pgerror.CodeInvalidForeignKeyError,
+				"columns cannot be used by multiple foreign key constraints")
 		}
 		tbl.PrimaryIndex.ForeignKey = ref
 		backref.Index = tbl.PrimaryIndex.ID
@@ -936,7 +942,8 @@ func resolveFK(
 		for i := range tbl.Indexes {
 			if matchesIndex(srcCols, tbl.Indexes[i], matchPrefix) {
 				if tbl.Indexes[i].ForeignKey.IsSet() {
-					return fmt.Errorf("columns cannot be used by multiple foreign key constraints")
+					return pgerror.NewErrorf(pgerror.CodeInvalidForeignKeyError,
+						"columns cannot be used by multiple foreign key constraints")
 				}
 				tbl.Indexes[i].ForeignKey = ref
 				backref.Index = tbl.Indexes[i].ID
@@ -945,6 +952,11 @@ func resolveFK(
 			}
 		}
 		if !found {
+			// Avoid unexpected index builds from ALTER TABLE ADD CONSTRAINT.
+			if mode == sqlbase.ConstraintValidity_Unvalidated {
+				return pgerror.NewErrorf(pgerror.CodeInvalidForeignKeyError,
+					"foreign key requires an existing index on columns %s", colNames(srcCols))
+			}
 			added, err := addIndexForFK(tbl, srcCols, constraintName, ref)
 			if err != nil {
 				return err
@@ -1154,9 +1166,10 @@ func (n *createViewNode) makeViewTableDesc(
 	p *parser.CreateView,
 	parentID sqlbase.ID,
 	id sqlbase.ID,
-	resultColumns []ResultColumn,
+	resultColumns []sqlbase.ResultColumn,
 	privileges *sqlbase.PrivilegeDescriptor,
 	affected map[sqlbase.ID]*sqlbase.TableDescriptor,
+	evalCtx *parser.EvalContext,
 ) (sqlbase.TableDescriptor, error) {
 	desc := sqlbase.TableDescriptor{
 		ID:            id,
@@ -1172,13 +1185,16 @@ func (n *createViewNode) makeViewTableDesc(
 	}
 	desc.Name = viewName.Table()
 	for i, colRes := range resultColumns {
-		colType, _ := parser.DatumTypeToColumnType(colRes.Typ)
+		colType, err := parser.DatumTypeToColumnType(colRes.Typ)
+		if err != nil {
+			return desc, err
+		}
 		columnTableDef := parser.ColumnTableDef{Name: parser.Name(colRes.Name), Type: colType}
 		if len(p.ColumnNames) > i {
 			columnTableDef.Name = p.ColumnNames[i]
 		}
 		// We pass an empty search path here because there are no names to resolve.
-		col, _, err := sqlbase.MakeColumnDefDescs(&columnTableDef, nil)
+		col, _, err := sqlbase.MakeColumnDefDescs(&columnTableDef, nil, evalCtx)
 		if err != nil {
 			return desc, err
 		}
@@ -1195,8 +1211,9 @@ func (n *createViewNode) makeViewTableDesc(
 func makeTableDescIfAs(
 	p *parser.CreateTable,
 	parentID, id sqlbase.ID,
-	resultColumns []ResultColumn,
+	resultColumns []sqlbase.ResultColumn,
 	privileges *sqlbase.PrivilegeDescriptor,
+	evalCtx *parser.EvalContext,
 ) (desc sqlbase.TableDescriptor, err error) {
 	desc = sqlbase.TableDescriptor{
 		ID:            id,
@@ -1221,7 +1238,7 @@ func makeTableDescIfAs(
 			columnTableDef.Name = p.AsColumnNames[i]
 		}
 		// We pass an empty search path here because we do not have any expressions to resolve.
-		col, _, err := sqlbase.MakeColumnDefDescs(&columnTableDef, nil)
+		col, _, err := sqlbase.MakeColumnDefDescs(&columnTableDef, nil, evalCtx)
 		if err != nil {
 			return desc, err
 		}
@@ -1242,6 +1259,7 @@ func MakeTableDesc(
 	privileges *sqlbase.PrivilegeDescriptor,
 	affected map[sqlbase.ID]*sqlbase.TableDescriptor,
 	sessionDB string,
+	evalCtx *parser.EvalContext,
 ) (sqlbase.TableDescriptor, error) {
 	desc := sqlbase.TableDescriptor{
 		ID:            id,
@@ -1267,7 +1285,7 @@ func MakeTableDesc(
 				}
 			}
 
-			col, idx, err := sqlbase.MakeColumnDefDescs(d, searchPath)
+			col, idx, err := sqlbase.MakeColumnDefDescs(d, searchPath, evalCtx)
 			if err != nil {
 				return desc, err
 			}
@@ -1440,6 +1458,7 @@ func (p *planner) makeTableDesc(
 		privileges,
 		affected,
 		p.session.Database,
+		&p.evalCtx,
 	)
 }
 
@@ -1543,7 +1562,7 @@ func makeCheckConstraint(
 		return nil, err
 	}
 
-	if err := sqlbase.SanitizeVarFreeExpr(expr, parser.TypeBool, "CHECK", searchPath); err != nil {
+	if _, err := sqlbase.SanitizeVarFreeExpr(expr, parser.TypeBool, "CHECK", searchPath); err != nil {
 		return nil, err
 	}
 	if generateName {

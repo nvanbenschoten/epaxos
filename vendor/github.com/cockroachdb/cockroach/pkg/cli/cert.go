@@ -31,8 +31,8 @@ const defaultKeySize = 2048
 
 // We use 366 days on certificate lifetimes to at least match X years,
 // otherwise leap years risk putting us just under.
-const defaultCALifetime = 5 * 366 * 24 * time.Hour   // five years
-const defaultCertLifetime = 2 * 366 * 24 * time.Hour // two years
+const defaultCALifetime = 10 * 366 * 24 * time.Hour   // ten years
+const defaultCertLifetime = 10 * 366 * 24 * time.Hour // ten years
 
 var keySize int
 var certificateLifetime time.Duration
@@ -170,24 +170,51 @@ func runListCerts(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(os.Stdout, "Certificate directory: %s\n", baseCfg.SSLCertsDir)
 
-	certTableHeaders := []string{"Usage", "Certificate File", "Key File", "Notes"}
+	certTableHeaders := []string{"Usage", "Certificate File", "Key File", "Notes", "Error"}
 	var rows [][]string
 
 	if ca := cm.CACert(); ca != nil {
-		rows = append(rows, []string{ca.FileUsage.String(), ca.Filename, ca.KeyFilename, ""})
+		var errString string
+		if ca.Error != nil {
+			errString = ca.Error.Error()
+		}
+		rows = append(rows, []string{
+			ca.FileUsage.String(),
+			ca.Filename,
+			ca.KeyFilename,
+			"",
+			errString,
+		})
 	}
 
 	if node := cm.NodeCert(); node != nil {
-		rows = append(rows, []string{node.FileUsage.String(), node.Filename, node.KeyFilename, ""})
+		var errString string
+		if node.Error != nil {
+			errString = node.Error.Error()
+		}
+		rows = append(rows, []string{
+			node.FileUsage.String(),
+			node.Filename,
+			node.KeyFilename,
+			"",
+			errString,
+		})
 	}
 
 	for name, cert := range cm.ClientCerts() {
-		rows = append(rows, []string{cert.FileUsage.String(), cert.Filename, cert.KeyFilename,
-			fmt.Sprintf("user=%s", name)})
+		var errString string
+		if cert.Error != nil {
+			errString = cert.Error.Error()
+		}
+		rows = append(rows, []string{cert.FileUsage.String(),
+			cert.Filename,
+			cert.KeyFilename,
+			fmt.Sprintf("user=%s", name),
+			errString,
+		})
 	}
 
-	printQueryOutput(os.Stdout, certTableHeaders, rows, "", cliCtx.tableDisplayFormat)
-	return nil
+	return printQueryOutput(os.Stdout, certTableHeaders, newRowSliceIter(rows), "", cliCtx.tableDisplayFormat)
 }
 
 var certCmds = []*cobra.Command{

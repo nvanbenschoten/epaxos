@@ -120,7 +120,7 @@ SELECT SUM(a), MIN(b), MAX(c), COUNT(d), AVG(a+b+c+d) FROM data
 query T
 SELECT url FROM [EXPLAIN (DISTSQL) SELECT SUM(a), round(STDDEV(b), 1) FROM data]
 ----
-https://cockroachdb.github.io/distsqlplan/decode.html?eJzEkjFr8zAQhvfvV5h3cuCGyE6-wZMKyZChaUnSLsWDah3GkEhGkqEl-L8X25TWIQ2UQDqe7p57XsQdYazmtTqwR_YCAUICQgrCDIQ5ckLtbMHeW9eNDMBKvyGbEipTN6F7zgmFdYzsiFCFPSPDTr3uecNKswNBc1DVvpfUrjoo9y61CgqEDRvNLoukiGQSCeQtwTbhc3FLPyi_TI2xTrNjPfLk7ZlQd2XpuFTBnmTaPt3HUkxA2O4Wi-VzLJOuWC2W610s08k4p7ON0bFMKOpalwKL2_9Rcntlenvl7G-P74xyw762xvPJEY735QTWJQ_3623jCn50tuiXD-VDP90_aPZh6IqhWJm-JbpY32FxEf4_gqencHKNOb0Gnl0Dz38F5-2_jwAAAP__E4Saug==
+https://cockroachdb.github.io/distsqlplan/decode.html?eJzEkkFr8kAQhu_fr5D3pDAHN-p32FMK9uChWtT2UnLYZocQ0N0wu4EWyX8vSSitYoUi2OPszDPPyzIHOG95afYcoF-gQEhAmIAwBWGGjFCJzzkEL-1IDyzsG_SYULqqju1zRsi9MPQBsYw7hsbWvO54zcaygGA5mnLXSSop90beU2uiAWFVRz1IFaUJsobg6_i5s6EfbF-S2nmxLGyPFFlzJs9dUQgXJvqTOJunh2GqRiBstvP5_fMwTdpizc6ytMkG4mtnh2lCA6W1Xiy3o4tJ1U3_JbmpbXJT2_TPLuyMbc2h8i7wyaUd78sIbAvujzT4WnJ-FJ93y_ty1U13D5ZD7LuqLxaua6k21ndYXYT_H8HjUzi5xjy5Bp5eA89-BWfNv48AAAD__2Tbkkg=
 
 query RR
 SELECT SUM(a), round(STDDEV(b), 1) FROM data
@@ -130,7 +130,7 @@ SELECT SUM(a), round(STDDEV(b), 1) FROM data
 query T
 SELECT url FROM [EXPLAIN (DISTSQL) SELECT SUM(a), round(VARIANCE(b), 1) FROM data]
 ----
-https://cockroachdb.github.io/distsqlplan/decode.html?eJzEkjFr8zAQhvfvV5h3cuCGyE6-wZNDm8FD0-KmXYoH1TqMIZGMJENL8H8vtimtQxoogXQ83T33vIg7QBvFG7lnh-QFAoQIhBiEBQhLFITGmpKdM7YfGYFMvSGZE2rdtL5_LgilsYzkAF_7HSPBVr7uOGep2IKg2Mt6N0gaW--lfU-V9BKEnLVimwSpCNIoECg6gmn95-KOflB-mVptrGLLauIpuhOhVlVluZLeHGV6fLoLUzED4XmVZ6vNzTpMo77MbtebbZjGs2lSa1qtwjSioG-diyyu_0vR9ZXx9ZWLvz2_E8qcXWO046MznO4rCKwqHi_YmdaW_GBNOSwfy_thenhQ7PzYFWOR6aEl-ljfYXEW_j-B58dwdIk5vgReXAIvfwUX3b-PAAAA__-rZJs5
+https://cockroachdb.github.io/distsqlplan/decode.html?eJzEksFKw0AQhu8-RflPLcyhm7Ye9pQiHnKwlVi9SA5rdgiBNhtmN6CUvLskQbSlFqRQj7Mz33w_y-xROcsrs2MP_QoFQgTCDIQ5CAtkhFpczt476UYGILHv0FNCWdVN6J4zQu6EofcIZdgyNDbmbcspG8sCguVgym0vqaXcGfmIrQkGhHUT9ChWFEfIWoJrwtfOln6xfUuayollYXugyNoTeZZFIVyY4I7iPD0_jGM1AeFlmSbL1d39OI66MuXKsnTZRuKayo7jiEZKa52sNpOzWdVVfya6qm12Vdv8327shC1lX7vK89GtHe7LCGwLHs7Uu0ZyfhSX98uHct1P9w-WfRi6aiiSqm-pLtZPWJ2Fbw_g6TEcXWKeXQLPL4EXf4Kz9uYzAAD__-x8ksc=
 
 query RR
 SELECT SUM(a), round(VARIANCE(b), 1) FROM data
@@ -342,3 +342,57 @@ query T
 SELECT URL FROM [EXPLAIN (DISTSQL) SELECT STDDEV(a+b) FROM data GROUP BY c, d]
 ----
 https://cockroachdb.github.io/distsqlplan/decode.html?eJzMlcFq3DAQhu99CjOnlqqwsp009UmF9JBLWrahl6KDYg2OYWMZSYaG4HcvawfSdZOZgnrQ0Za-0cz3g_QIg7N4be4xQPMTJAgoQUAFAmoQcAZawOhdiyE4f9yyAlf2FzQ7Af0wTvH4WwtonUdoHiH28YDQwI25PeAejUUPAixG0x-WQ0bf3xv_oKyJBgTscbDom0LJ4n2hykJVhapBzwLcFJ_KP1e9fSjuTLg7rahKoSrQs57FK_09F5gG5y16tCcl9PzCBJ-7zmNnovMvHSfg-83l5Zcfb5V8t2n3P_dx7T64cbPt9eNk5rHITGIpM_dUZuKpytxTlYmnOnNPdSaemGdjj2F0Q0DyvtMC0Ha4jhLc5Fv85l27FF8_vy67l9vGYojr6tPH1bAuHdv6d7hOgc9T4IsUWO5oWm7p3Z90ScMlCctT37stXaWERcNMWDTMhEXDTFjMzExYdUpYZym6aZjRTcOMbhpmdDMzM7rPU3R_TNFNw4xuGmZ00zCjm5mZ0X2RovtTim4aZnTTMKObhhndzMzczf_Xw0H61vOb3wEAAP__iAmuQw==
+
+# Test plans with empty streams.
+statement ok
+CREATE TABLE one (k INT PRIMARY KEY, v INT)
+
+statement ok
+ALTER TABLE one SPLIT AT VALUES (0), (99)
+
+statement ok
+ALTER TABLE one TESTING_RELOCATE VALUES (ARRAY[1], 0)
+
+statement ok
+INSERT INTO one VALUES (1,1), (2,2), (3,3), (4,4), (5,5), (6,6), (7,7), (8,8), (9,9), (10,10)
+
+statement ok
+CREATE TABLE two (k INT PRIMARY KEY, v INT);
+
+statement ok
+ALTER TABLE two SPLIT AT VALUES (0), (99)
+
+statement ok
+ALTER TABLE two TESTING_RELOCATE VALUES (ARRAY[2], 0)
+
+statement ok
+INSERT INTO two VALUES (1,1), (2,2), (3,3), (4,4), (5,5), (6,6), (7,7), (8,8), (9,9), (10,10)
+
+query TTTI colnames
+SHOW TESTING_RANGES FROM TABLE one
+----
+Start Key  End Key  Replicas  Lease Holder
+NULL       /0       {5}       5
+/0         /99      {1}       1
+/99        NULL     {5}       5
+
+query TTTI colnames
+SHOW TESTING_RANGES FROM TABLE two
+----
+Start Key  End Key  Replicas  Lease Holder
+NULL       /0       {5}       5
+/0         /99      {2}       2
+/99        NULL     {5}       5
+
+query T
+SELECT URL FROM [EXPLAIN (DISTSQL) SELECT COUNT(*) FROM one AS a, one AS b, two AS c]
+----
+https://cockroachdb.github.io/distsqlplan/decode.html?eJzUkstO8zAQhff_U1Sz-pG8aNKWi1dFbCiLFlVlhbIw8ShEaj3R2BGgKu-O4ghBAnIbReKytGe-M8fjswdDGpdqhxbkPUQgIAYBM0gEFEwpWktcl5rGhX4GORaQm6J09XUiICVGkHtwudsiSNiohy2uUWlkEKDRqXzrxQvOd4pf5mQQBKxKJ0eQVAKodG9qlfjhOe_ypSHWyKhb4p481PKF2WtlH28oN12vv9vdGo1GlqPxkH-6zDLGTDnqiF-t7pab__PoJCgeDQyBe6KjQhB_U9j-ypxj93bg89doCzIWuzFt6SUCUGfYJNxSySneMqVevDmufLe_0GhdU500h4Xxpai29RGOgnAchuMek-MuPAnC0xY87sLTIHwRhmc93vzJ9umQbZ8N2fZ5L9tJ9e81AAD__42OQB0=
+
+query I
+SELECT COUNT(*) FROM one AS a, one AS b, two AS c
+----
+1000
+
+statement error memory budget exceeded
+SELECT SUM(d1.a), MAX(d1.a), MIN(d1.a) FROM data as d1, data as d2 GROUP BY (d1.b, d1.c, d1.d, d2.a, d2.b, d2.c, d2.d)

@@ -73,13 +73,11 @@ func (s *subquery) Format(buf *bytes.Buffer, f parser.FmtFlags) {
 	if s.execMode == execModeExists {
 		buf.WriteString("EXISTS ")
 	}
-	if f == parser.FmtShowTypes {
-		// TODO(knz/nvanbenschoten) It is not possible to extract types
-		// from the subquery using Format, because type checking does not
-		// replace the sub-expressions of a SelectClause node in-place.
-		f = parser.FmtSimple
-	}
-	s.subquery.Format(buf, f)
+	// Note: we remove the flag to print types, because subqueries can
+	// be printed in a context where type resolution has not occurred
+	// yet. We do not use FmtSimple directly however, in case the
+	// caller wants to use other flags (e.g. to anonymize identifiers).
+	parser.FormatNode(buf, parser.StripTypeFormatting(f), s.subquery)
 }
 
 func (s *subquery) String() string { return parser.AsString(s) }
@@ -96,7 +94,7 @@ func (s *subquery) TypeCheck(_ *parser.SemaContext, desired parser.Type) (parser
 	// sub-query. For now, the type is simply derived during the subquery node
 	// creation by looking at the result column types.
 
-	// TODO(nvanbenschoten) Type checking for the comparison operator(s)
+	// TODO(nvanbenschoten): Type checking for the comparison operator(s)
 	// should take this new node into account. In particular it should
 	// check that the tuple types match pairwise.
 	return s, nil
@@ -349,7 +347,7 @@ func (v *subqueryVisitor) VisitPre(expr parser.Expr) (recurse bool, newExpr pars
 	// Calling newPlan() might recursively invoke expandSubqueries, so we need to preserve
 	// the state of the visitor across the call to newPlan().
 	visitorCopy := v.planner.subqueryVisitor
-	plan, err := v.planner.newPlan(v.ctx, sq.Select, nil, false)
+	plan, err := v.planner.newPlan(v.ctx, sq.Select, nil)
 	v.planner.subqueryVisitor = visitorCopy
 	if err != nil {
 		v.err = err

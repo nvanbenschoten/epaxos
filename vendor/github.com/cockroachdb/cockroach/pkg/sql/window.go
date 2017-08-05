@@ -94,7 +94,9 @@ func (p *planner) window(
 	window.replaceIndexVarsAndAggFuncs(s)
 
 	acc := p.session.TxnState.makeBoundAccount()
-	window.wrappedRenderVals = NewRowContainer(acc, s.columns, 0)
+	window.wrappedRenderVals = sqlbase.NewRowContainer(
+		acc, sqlbase.ColTypeInfoFromResCols(s.columns), 0,
+	)
 	window.windowsAcc = p.session.TxnState.OpenAccount()
 
 	return window, nil
@@ -112,7 +114,7 @@ func (n *windowNode) extractWindowFunctions(s *renderNode) error {
 	oldRenders := s.render
 	oldColumns := s.columns
 	newRenders := make([]parser.TypedExpr, 0, len(oldRenders))
-	newColumns := make([]ResultColumn, 0, len(oldColumns))
+	newColumns := make([]sqlbase.ResultColumn, 0, len(oldColumns))
 	for i := range oldRenders {
 		// Add all window function applications found in oldRenders[i] to window.funcs.
 		typedExpr, numFuncsAdded, err := visitor.extract(oldRenders[i])
@@ -134,7 +136,7 @@ func (n *windowNode) extractWindowFunctions(s *renderNode) error {
 				for _, argExpr := range funcHolder.args {
 					arg := argExpr.(parser.TypedExpr)
 					newRenders = append(newRenders, arg)
-					newColumns = append(newColumns, ResultColumn{
+					newColumns = append(newColumns, sqlbase.ResultColumn{
 						Name: arg.String(),
 						Typ:  arg.ResolvedType(),
 					})
@@ -170,14 +172,15 @@ func (n *windowNode) constructWindowDefinitions(
 			return err
 		}
 
-		// TODO(nvanbenschoten) below we add renders to the renderNode for each
+		// TODO(nvanbenschoten): below we add renders to the renderNode for each
 		// partition and order expression. We should handle cases where the expression
 		// is already referenced by the query like sortNode does.
 
 		// Validate PARTITION BY clause.
 		for _, partition := range windowDef.Partitions {
 			cols, exprs, _, err := s.planner.computeRenderAllowingStars(ctx,
-				parser.SelectExpr{Expr: partition}, parser.TypeAny, s.sourceInfo, s.ivarHelper)
+				parser.SelectExpr{Expr: partition}, parser.TypeAny, s.sourceInfo, s.ivarHelper,
+				autoGenerateRenderOutputName)
 			if err != nil {
 				return err
 			}
@@ -187,7 +190,8 @@ func (n *windowNode) constructWindowDefinitions(
 		// Validate ORDER BY clause.
 		for _, orderBy := range windowDef.OrderBy {
 			cols, exprs, _, err := s.planner.computeRenderAllowingStars(ctx,
-				parser.SelectExpr{Expr: orderBy.Expr}, parser.TypeAny, s.sourceInfo, s.ivarHelper)
+				parser.SelectExpr{Expr: orderBy.Expr}, parser.TypeAny, s.sourceInfo, s.ivarHelper,
+				autoGenerateRenderOutputName)
 			if err != nil {
 				return err
 			}
@@ -349,7 +353,7 @@ func (n *windowNode) replaceIndexVarsAndAggFuncs(s *renderNode) {
 			case *parser.IndexedVar:
 				// We add a new render to the source renderNode for each new IndexedVar we
 				// see. We also register this mapping in the idxMap.
-				col := ResultColumn{Name: t.String(), Typ: t.ResolvedType()}
+				col := sqlbase.ResultColumn{Name: t.String(), Typ: t.ResolvedType()}
 				colIdx := s.addOrMergeRender(col, t, true)
 				n.colContainer.idxMap[t.Idx] = colIdx
 				return nil, false, ivarHelper.IndexedVar(t.Idx)
@@ -360,7 +364,7 @@ func (n *windowNode) replaceIndexVarsAndAggFuncs(s *renderNode) {
 				if t.GetAggregateConstructor() != nil {
 					// We add a new render to the source renderNode for each new aggregate
 					// function we see.
-					col := ResultColumn{Name: t.String(), Typ: t.ResolvedType()}
+					col := sqlbase.ResultColumn{Name: t.String(), Typ: t.ResolvedType()}
 					colIdx := s.addOrMergeRender(col, t, true)
 
 					if iVar, ok := aggIVars[colIdx]; ok {
@@ -371,7 +375,7 @@ func (n *windowNode) replaceIndexVarsAndAggFuncs(s *renderNode) {
 
 					// Create a new IndexedVar with the next available index.
 					idx := len(n.aggContainer.idxMap)
-					aggIVar := parser.NewOrdinalReference(idx)
+					aggIVar := parser.NewIndexedVar(idx)
 					aggIVars[colIdx] = aggIVar
 					n.aggContainer.idxMap[idx] = colIdx
 					n.aggContainer.aggFuncs[idx] = t
@@ -394,9 +398,14 @@ func (n *windowNode) replaceIndexVarsAndAggFuncs(s *renderNode) {
 		// an IndexedVarHelper and bind each of the corresponding IndexedVars to
 		// the helper.
 		aggHelper := parser.MakeIndexedVarHelper(&n.aggContainer, len(aggIVars))
-		for _, aggIVar := range aggIVars {
-			if err := aggHelper.BindIfUnbound(aggIVar); err != nil {
+		for _, ivar := range aggIVars {
+			// The ivars above have been created with a nil container, and
+			// therefore they are guaranteed to be modified in-place by
+			// BindIfUnbound().
+			if newIvar, err := aggHelper.BindIfUnbound(ivar); err != nil {
 				panic(err)
+			} else if newIvar != ivar {
+				panic(fmt.Sprintf("unexpected binding: %v, expected: %v", newIvar, ivar))
 			}
 		}
 	}
@@ -426,7 +435,7 @@ type windowNode struct {
 	//     we need to buffer all values here while we compute window function results. We
 	//     then index into these values in colContainer.IndexedVarEval and
 	//     aggContainer.IndexedVarEval. (see replaceIndexVarsAndAggFuncs)
-	wrappedRenderVals *RowContainer
+	wrappedRenderVals *sqlbase.RowContainer
 	sourceCols        int
 
 	// A sparse array holding renders specific to this windowNode. This will contain
@@ -454,7 +463,7 @@ type windowNode struct {
 	explain explainMode
 }
 
-func (n *windowNode) Columns() ResultColumns {
+func (n *windowNode) Columns() sqlbase.ResultColumns {
 	return n.values.Columns()
 }
 
@@ -532,7 +541,7 @@ func (n *windowNode) Next(ctx context.Context) (bool, error) {
 type partitionSorter struct {
 	evalCtx       *parser.EvalContext
 	rows          []parser.IndexedRow
-	windowDefVals *RowContainer
+	windowDefVals *sqlbase.RowContainer
 	ordering      sqlbase.ColumnOrdering
 }
 
@@ -636,7 +645,7 @@ func (n *windowNode) computeWindows(ctx context.Context) error {
 		// Partition rows into separate partitions based on hash values of the
 		// window function's PARTITION BY attribute.
 		//
-		// TODO(nvanbenschoten) Window functions with the same window definition
+		// TODO(nvanbenschoten): Window functions with the same window definition
 		// can share partition and sorting work.
 		// See Cao et al. [http://vldb.org/pvldb/vol5/p1244_yucao_vldb2012.pdf]
 		for rowI := 0; rowI < rowCount; rowI++ {
@@ -679,7 +688,7 @@ func (n *windowNode) computeWindows(ctx context.Context) error {
 		//   * Segment Tree
 		// See Leis et al. [http://www.vldb.org/pvldb/vol8/p1058-leis.pdf]
 		for _, partition := range partitions {
-			// TODO(nvanbenschoten) Handle framing here. Right now we only handle the default
+			// TODO(nvanbenschoten): Handle framing here. Right now we only handle the default
 			// framing option of RANGE UNBOUNDED PRECEDING. With ORDER BY, this sets the frame
 			// to be all rows from the partition start up through the current row's last ORDER BY
 			// peer. Without ORDER BY, all rows of the partition are included in the window frame,
@@ -760,8 +769,10 @@ func (n *windowNode) computeWindows(ctx context.Context) error {
 func (n *windowNode) populateValues(ctx context.Context) error {
 	acc := n.windowsAcc.Wtxn(n.planner.session)
 	rowCount := n.wrappedRenderVals.Len()
-	n.values.rows = NewRowContainer(
-		n.planner.session.TxnState.makeBoundAccount(), n.values.columns, rowCount,
+	n.values.rows = sqlbase.NewRowContainer(
+		n.planner.session.TxnState.makeBoundAccount(),
+		sqlbase.ColTypeInfoFromResCols(n.values.columns),
+		rowCount,
 	)
 
 	row := make(parser.Datums, len(n.windowRender))

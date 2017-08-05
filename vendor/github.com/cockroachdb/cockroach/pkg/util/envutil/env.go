@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"os/user"
 	"runtime"
 	"strconv"
 	"strings"
@@ -145,6 +146,20 @@ func GetShellCommand(cmd string) []string {
 	return []string{"/bin/sh", "-c", cmd}
 }
 
+// HomeDir returns the user's home directory, as determined by the env
+// var HOME, if it exists, and otherwise the system's idea of the user
+// configuration (e.g. on non-UNIX systems).
+func HomeDir() (string, error) {
+	if homeDir := os.Getenv("HOME"); len(homeDir) > 0 {
+		return homeDir, nil
+	}
+	userAcct, err := user.Current()
+	if err != nil {
+		return "", err
+	}
+	return userAcct.HomeDir, nil
+}
+
 // EnvString returns the value set by the specified environment variable. The
 // depth argument indicates the stack depth of the caller that should be
 // associated with the variable.
@@ -194,19 +209,6 @@ func EnvOrDefaultInt(name string, value int) int {
 func EnvOrDefaultInt64(name string, value int64) int64 {
 	if str, present := getEnv(name, 1); present {
 		v, err := strconv.ParseInt(str, 0, 64)
-		if err != nil {
-			panic(fmt.Sprintf("error parsing %s: %s", name, err))
-		}
-		return v
-	}
-	return value
-}
-
-// EnvOrDefaultFloat returns the value set by the specified environment
-// variable, if any, otherwise the specified default value.
-func EnvOrDefaultFloat(name string, value float64) float64 {
-	if str, present := getEnv(name, 1); present {
-		v, err := strconv.ParseFloat(str, 64)
 		if err != nil {
 			panic(fmt.Sprintf("error parsing %s: %s", name, err))
 		}

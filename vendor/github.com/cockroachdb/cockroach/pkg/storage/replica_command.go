@@ -40,6 +40,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
@@ -61,6 +62,15 @@ const (
 	// operation.
 	collectChecksumTimeout = 5 * time.Second
 )
+
+// gcBatchSize controls the amount of work done in a single pass of
+// MVCC GC. Setting this too high may block the range for too long
+// (especially a risk in the system ranges), while setting it too low
+// may allow ranges to grow too large if we are unable to keep up with
+// the amount of garbage generated.
+var gcBatchSize = settings.RegisterIntSetting("kv.gc.batch_size",
+	"maximum number of keys in a batch for MVCC garbage collection",
+	100000)
 
 // CommandArgs contains all the arguments to a command.
 // TODO(bdarnell): consider merging with storagebase.FilterArgs (which
@@ -228,7 +238,7 @@ func evaluateCommand(
 	// }
 
 	if log.V(2) {
-		log.Infof(ctx, "executed %s command %+v: %+v, err=%v", args.Method(), args, reply, err)
+		log.Infof(ctx, "evaluated %s command %+v: %+v, err=%v", args.Method(), args, reply, err)
 	}
 
 	// Create a roachpb.Error by initializing txn from the request/response header.
@@ -506,9 +516,9 @@ func evalBeginTransaction(
 				reply.Txn.Update(&tmpTxn)
 			} else {
 				// Our txn record already exists. This is either a client error, sending
-				// a duplicate BeginTransaction, or it's an artefact of DistSender
+				// a duplicate BeginTransaction, or it's an artifact of DistSender
 				// re-sending a batch. Assume the latter and ask the client to restart.
-				return EvalResult{}, roachpb.NewTransactionRetryError()
+				return EvalResult{}, roachpb.NewTransactionRetryError(roachpb.RETRY_POSSIBLE_REPLAY)
 			}
 
 		case roachpb.COMMITTED:
@@ -664,6 +674,11 @@ func evalEndTransaction(
 	} else if !ok {
 		return EvalResult{}, roachpb.NewTransactionStatusError("does not exist")
 	}
+	// We're using existingTxn on the reply, even though it can be stale compared
+	// to the Transaction in the request (e.g. the Sequence can be stale). This is
+	// OK since we're processing an EndTransaction and so there's not going to be
+	// more requests using the transaction from this reply (or, in case of a
+	// restart, we'll reset the Transaction anyway).
 	reply.Txn = &existingTxn
 
 	// Verify that we can either commit it or abort it (according
@@ -756,8 +771,8 @@ func evalEndTransaction(
 	// Set transaction status to COMMITTED or ABORTED as per the
 	// args.Commit parameter.
 	if args.Commit {
-		if isEndTransactionTriggeringRetryError(h.Txn, reply.Txn) {
-			return EvalResult{}, roachpb.NewTransactionRetryError()
+		if retry, reason := isEndTransactionTriggeringRetryError(h.Txn, reply.Txn); retry {
+			return EvalResult{}, roachpb.NewTransactionRetryError(reason)
 		}
 		reply.Txn.Status = roachpb.COMMITTED
 	} else {
@@ -818,28 +833,30 @@ func isEndTransactionExceedingDeadline(t hlc.Timestamp, args roachpb.EndTransact
 // isEndTransactionTriggeringRetryError returns true if the
 // EndTransactionRequest cannot be committed and needs to return a
 // TransactionRetryError.
-func isEndTransactionTriggeringRetryError(headerTxn, currentTxn *roachpb.Transaction) bool {
+func isEndTransactionTriggeringRetryError(
+	headerTxn, currentTxn *roachpb.Transaction,
+) (bool, roachpb.TransactionRetryReason) {
 	// If we saw any WriteTooOldErrors, we must restart to avoid lost
 	// update anomalies.
 	if headerTxn.WriteTooOld {
-		return true
+		return true, roachpb.RETRY_WRITE_TOO_OLD
 	}
 
 	isTxnPushed := currentTxn.Timestamp != headerTxn.OrigTimestamp
 
 	// If pushing requires a retry and the transaction was pushed, retry.
 	if headerTxn.RetryOnPush && isTxnPushed {
-		return true
+		return true, roachpb.RETRY_DELETE_RANGE
 	}
 
 	// If the isolation level is SERIALIZABLE, return a transaction
 	// retry error if the commit timestamp isn't equal to the txn
 	// timestamp.
 	if headerTxn.Isolation == enginepb.SERIALIZABLE && isTxnPushed {
-		return true
+		return true, roachpb.RETRY_SERIALIZABLE
 	}
 
-	return false
+	return false, 0
 }
 
 // resolveLocalIntents synchronously resolves any intents that are
@@ -950,7 +967,7 @@ func updateTxnWithExternalIntents(
 // A range-local intent range is never split: It's returned as either
 // belonging to or outside of the descriptor's key range, and passing an intent
 // which begins range-local but ends non-local results in a panic.
-// TODO(tschottdorf) move to proto, make more gen-purpose - kv.truncate does
+// TODO(tschottdorf): move to proto, make more gen-purpose - kv.truncate does
 // some similar things.
 func intersectSpan(
 	span roachpb.Span, desc roachpb.RangeDescriptor,
@@ -1232,7 +1249,7 @@ func evalRangeLookup(
 	}
 
 	for _, kv := range kvs {
-		// TODO(tschottdorf) Candidate for a ReplicaCorruptionError.
+		// TODO(tschottdorf): Candidate for a ReplicaCorruptionError.
 		rd, err := checkAndUnmarshal(kv.Value)
 		if err != nil {
 			return EvalResult{}, err
@@ -1364,20 +1381,29 @@ func evalHeartbeatTxn(
 func declareKeysGC(
 	desc roachpb.RangeDescriptor, header roachpb.Header, req roachpb.Request, spans *SpanSet,
 ) {
+	// Intentionally don't call DefaultDeclareKeys: the key range in the header
+	// is usually the whole range (pending resolution of #7880).
 	gcr := req.(*roachpb.GCRequest)
 	for _, key := range gcr.Keys {
 		spans.Add(SpanReadWrite, roachpb.Span{Key: key.Key})
 	}
-	spans.Add(SpanReadWrite, roachpb.Span{Key: keys.RangeLastGCKey(header.RangeID)})
-	spans.Add(SpanReadWrite, roachpb.Span{
-		// TODO(bdarnell): since this must be checked by all
-		// reads, this should be factored out into a separate
-		// waiter which blocks only those reads far enough in the
-		// past to be affected by the in-flight GCRequest (i.e.
-		// normally none). This means this key would be special
-		// cased and not tracked by the command queue.
-		Key: keys.RangeTxnSpanGCThresholdKey(header.RangeID),
-	})
+	// Be smart here about blocking on the threshold keys. The GC queue can send an empty
+	// request first to bump the thresholds, and then another one that actually does work
+	// but can avoid declaring these keys below.
+	if gcr.Threshold != (hlc.Timestamp{}) {
+		spans.Add(SpanReadWrite, roachpb.Span{Key: keys.RangeLastGCKey(header.RangeID)})
+	}
+	if gcr.TxnSpanGCThreshold != (hlc.Timestamp{}) {
+		spans.Add(SpanReadWrite, roachpb.Span{
+			// TODO(bdarnell): since this must be checked by all
+			// reads, this should be factored out into a separate
+			// waiter which blocks only those reads far enough in the
+			// past to be affected by the in-flight GCRequest (i.e.
+			// normally none). This means this key would be special
+			// cased and not tracked by the command queue.
+			Key: keys.RangeTxnSpanGCThresholdKey(header.RangeID),
+		})
+	}
 	spans.Add(SpanReadOnly, roachpb.Span{Key: keys.RangeDescriptorKey(desc.StartKey)})
 }
 
@@ -1406,34 +1432,53 @@ func evalGC(
 	}
 
 	// Garbage collect the specified keys by expiration timestamps.
-	err := engine.MVCCGarbageCollect(ctx, batch, cArgs.Stats, keys, h.Timestamp)
+	err := engine.MVCCGarbageCollect(ctx, batch, cArgs.Stats, keys, h.Timestamp, gcBatchSize.Get())
 	if err != nil {
 		return EvalResult{}, err
 	}
 
-	newThreshold, err := cArgs.EvalCtx.GCThreshold()
-	if err != nil {
-		return EvalResult{}, err
-	}
-	newTxnSpanGCThreshold, err := cArgs.EvalCtx.TxnSpanGCThreshold()
-	if err != nil {
-		return EvalResult{}, err
-	}
 	// Protect against multiple GC requests arriving out of order; we track
 	// the maximum timestamps.
-	newThreshold.Forward(args.Threshold)
-	newTxnSpanGCThreshold.Forward(args.TxnSpanGCThreshold)
 
-	var pd EvalResult
-	pd.Replicated.State.GCThreshold = newThreshold
-	pd.Replicated.State.TxnSpanGCThreshold = newTxnSpanGCThreshold
-
-	if err := cArgs.EvalCtx.stateLoader().setGCThreshold(ctx, batch, cArgs.Stats, &newThreshold); err != nil {
-		return EvalResult{}, err
+	var newThreshold hlc.Timestamp
+	if args.Threshold != (hlc.Timestamp{}) {
+		oldThreshold, err := cArgs.EvalCtx.GCThreshold()
+		if err != nil {
+			return EvalResult{}, err
+		}
+		newThreshold = oldThreshold
+		newThreshold.Forward(args.Threshold)
 	}
 
-	if err := cArgs.EvalCtx.stateLoader().setTxnSpanGCThreshold(ctx, batch, cArgs.Stats, &newTxnSpanGCThreshold); err != nil {
-		return EvalResult{}, err
+	var newTxnSpanGCThreshold hlc.Timestamp
+	if args.TxnSpanGCThreshold != (hlc.Timestamp{}) {
+		oldTxnSpanGCThreshold, err := cArgs.EvalCtx.TxnSpanGCThreshold()
+		if err != nil {
+			return EvalResult{}, err
+		}
+		newTxnSpanGCThreshold = oldTxnSpanGCThreshold
+		newTxnSpanGCThreshold.Forward(args.TxnSpanGCThreshold)
+	}
+
+	var pd EvalResult
+	stateLoader := makeReplicaStateLoader(cArgs.EvalCtx.RangeID())
+
+	// Don't write these keys unless we have to. We also don't declare these
+	// keys unless we have to (to allow the GC queue to batch requests more
+	// efficiently), and we must honor what we declare.
+
+	if newThreshold != (hlc.Timestamp{}) {
+		pd.Replicated.State.GCThreshold = newThreshold
+		if err := stateLoader.setGCThreshold(ctx, batch, cArgs.Stats, &newThreshold); err != nil {
+			return EvalResult{}, err
+		}
+	}
+
+	if newTxnSpanGCThreshold != (hlc.Timestamp{}) {
+		pd.Replicated.State.TxnSpanGCThreshold = newTxnSpanGCThreshold
+		if err := stateLoader.setTxnSpanGCThreshold(ctx, batch, cArgs.Stats, &newTxnSpanGCThreshold); err != nil {
+			return EvalResult{}, err
+		}
 	}
 
 	return pd, nil
@@ -1557,11 +1602,6 @@ func evalPushTxn(
 	}
 	// Start with the persisted transaction record as final transaction.
 	reply.PusheeTxn = existTxn.Clone()
-	// The pusher might be aware of a newer version of the pushee.
-	reply.PusheeTxn.Timestamp.Forward(args.PusheeTxn.Timestamp)
-	if reply.PusheeTxn.Epoch < args.PusheeTxn.Epoch {
-		reply.PusheeTxn.Epoch = args.PusheeTxn.Epoch
-	}
 
 	// If already committed or aborted, return success.
 	if reply.PusheeTxn.Status != roachpb.PENDING {
@@ -1575,6 +1615,13 @@ func evalPushTxn(
 		// Trivial noop.
 		return EvalResult{}, nil
 	}
+
+	// The pusher might be aware of a newer version of the pushee.
+	reply.PusheeTxn.Timestamp.Forward(args.PusheeTxn.Timestamp)
+	if reply.PusheeTxn.Epoch < args.PusheeTxn.Epoch {
+		reply.PusheeTxn.Epoch = args.PusheeTxn.Epoch
+	}
+	reply.PusheeTxn.UpgradePriority(args.PusheeTxn.Priority)
 
 	var pusherWins bool
 	var reason string
@@ -1952,7 +1999,7 @@ func evalRequestLease(
 		return newFailedLeaseTrigger(false /* isTransfer */), rErr
 	}
 	args.Lease.Start = effectiveStart
-	return applyNewLease(ctx, cArgs.EvalCtx, batch, cArgs.Stats,
+	return evalNewLease(ctx, cArgs.EvalCtx, batch, cArgs.Stats,
 		args.Lease, prevLease, isExtension, false /* isTransfer */)
 }
 
@@ -1975,11 +2022,11 @@ func evalTransferLease(
 	if log.V(2) {
 		log.Infof(ctx, "lease transfer: prev lease: %+v, new lease: %+v", prevLease, args.Lease)
 	}
-	return applyNewLease(ctx, cArgs.EvalCtx, batch, cArgs.Stats,
+	return evalNewLease(ctx, cArgs.EvalCtx, batch, cArgs.Stats,
 		args.Lease, prevLease, false /* isExtension */, true /* isTransfer */)
 }
 
-// applyNewLease checks that the lease contains a valid interval and that
+// evalNewLease checks that the lease contains a valid interval and that
 // the new lease holder is still a member of the replica set, and then proceeds
 // to write the new lease to the batch, emitting an appropriate trigger.
 //
@@ -1992,7 +2039,7 @@ func evalTransferLease(
 //
 // TODO(tschottdorf): refactoring what's returned from the trigger here makes
 // sense to minimize the amount of code intolerant of rolling updates.
-func applyNewLease(
+func evalNewLease(
 	ctx context.Context,
 	rec ReplicaEvalContext,
 	batch engine.ReadWriter,

@@ -67,7 +67,7 @@ GROUP BY i.relname,
          ix.indkey
 ORDER BY i.relname
 ----
-name              PRIMARY  UNIQUE  indkey  column_indexes  column_names  definition
+name              primary  unique  indkey  column_indexes  column_names  definition
 customers_id_idx  false    false   2       {1,2}           {name,id}     CREATE INDEX customers_id_idx ON test.customers (id ASC)
 primary           true     true    1       {1,2}           {name,id}     CREATE UNIQUE INDEX "primary" ON test.customers (name ASC)
 
@@ -101,3 +101,31 @@ AND t3.nspname = ANY (current_schemas(false))
 ORDER BY c.conname
 ----
 a  a_id  id  fk_a_id_ref_a  a  a
+
+# Default value columns in Rails produce these kinds of queries:
+query O
+SELECT 'decimal(18,2)'::regtype::oid
+----
+1700
+
+query O
+SELECT 'character varying'::regtype::oid
+----
+25
+
+statement ok
+CREATE INDEX b_idx ON b(a_id);
+
+# ActiveRecord 4.2.x query for checking if an index exists
+# Relies on OID IN tuple support
+query I
+SELECT COUNT(*)
+FROM pg_class t
+INNER JOIN pg_index d ON t.oid = d.indrelid
+INNER JOIN pg_class i ON d.indexrelid = i.oid
+WHERE i.relkind = 'i'
+AND i.relname = 'b_idx'
+AND t.relname = 'b'
+AND i.relnamespace IN (SELECT oid FROM pg_namespace WHERE nspname = ANY (current_schemas(false)))
+----
+1

@@ -23,6 +23,7 @@ import (
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
@@ -67,6 +68,7 @@ func TestJoinReader(t *testing.T) {
 	}{
 		{
 			post: PostProcessSpec{
+				Projection:    true,
 				OutputColumns: []uint32{0, 1, 2},
 			},
 			input: [][]parser.Datum{
@@ -80,6 +82,7 @@ func TestJoinReader(t *testing.T) {
 		{
 			post: PostProcessSpec{
 				Filter:        Expression{Expr: "@3 <= 5"}, // sum <= 5
+				Projection:    true,
 				OutputColumns: []uint32{3},
 			},
 			input: [][]parser.Datum{
@@ -99,7 +102,8 @@ func TestJoinReader(t *testing.T) {
 		flowCtx := FlowCtx{
 			evalCtx:  parser.EvalContext{},
 			txnProto: &roachpb.Transaction{},
-			clientDB: kvDB,
+			// Pass a DB without a TxnCoordSender.
+			remoteTxnDB: client.NewDB(s.DistSender(), s.Clock()),
 		}
 
 		in := &RowBuffer{}
@@ -167,7 +171,8 @@ func TestJoinReaderDrain(t *testing.T) {
 	flowCtx := FlowCtx{
 		evalCtx:  parser.EvalContext{},
 		txnProto: &roachpb.Transaction{},
-		clientDB: kvDB,
+		// Pass a DB without a TxnCoordSender.
+		remoteTxnDB: client.NewDB(s.DistSender(), s.Clock()),
 	}
 
 	encRow := make(sqlbase.EncDatumRow, 1)
