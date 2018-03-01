@@ -14,12 +14,12 @@ replicated and preserved even in the case of failures. The basic algorithm was
 famously described by Leslie Lamport in his 1998 paper, [The Part-Time
 Parliament](https://www.microsoft.com/en-us/research/publication/part-time-parliament/).
 It was later clarified in his follow-up paper from 2001, [Paxos Made
-Simple](https://www.microsoft.com/en-us/research/publication/paxos-made-simple/?from=https%3A%2F%2Fresearch.microsoft.com%2Fen-us%2Fum%2Fpeople%2Flamport%2Fpubs%2Fpaxos-simple.pdf).
+Simple](https://www.microsoft.com/en-us/research/publication/paxos-made-simple/).
 
 Egalitarian Paxos is an efficient, leaderless variation of this protocol,
 proposed by Iulian Moraru in his 2013 paper, [There Is More Consensus in
 Egalitarian
-Parliaments](http://delivery.acm.org/10.1145/2520000/2517350/p358-moraru.pdf?ip=209.6.79.135&id=2517350&acc=OA&key=4D4702B0C3E38B35%2E4D4702B0C3E38B35%2E4D4702B0C3E38B35%2EC42B82B87617960C&CFID=755096137&CFTOKEN=25359323&__acm__=1493150278_439ca70486fb3a890d145fe85ea9f1c5).
+Parliaments](https://www.cs.cmu.edu/~dga/papers/epaxos-sosp2013.pdf).
 It provides strong consistency with optimal wide-area latency, perfect
 load-balancing across replicas (both in the local and the wide area), and
 constant availability for up to F failures. Concretely, it provides the
