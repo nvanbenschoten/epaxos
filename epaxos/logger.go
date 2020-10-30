@@ -105,7 +105,7 @@ func (l *DefaultLogger) Fatalf(format string, v ...interface{}) {
 
 // Panic implements the Logger interface.
 func (l *DefaultLogger) Panic(v ...interface{}) {
-	l.Logger.Panic(v)
+	l.Logger.Panic(v...)
 }
 
 // Panicf implements the Logger interface.
