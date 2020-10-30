@@ -1,15 +1,10 @@
 GO     ?= go
-DEP    ?= dep
 
 EPAXOSSRC := ./epaxos
 
 .PHONY: test
 test:
 	@$(GO) test -v $(EPAXOSSRC)/...
-
-.PHONY: dep
-dep:
-	@$(DEP) ensure -update
 
 .PHONY: proto
 proto:
